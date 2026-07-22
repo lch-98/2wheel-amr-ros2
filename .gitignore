@@ -1,0 +1,11 @@
+# colcon 빌드 산출물 (src 상위 폴더에 생기지만 혹시 몰라 방어적으로 추가)
+build/
+install/
+log/
+
+# 파이썬 캐시
+__pycache__/
+*.pyc
+
+# 에디터 설정
+.vscode/

@@ -1,0 +1,377 @@
+<?xml version="1.0"?>
+<robot name="my_robot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- ══════════════════════════════════════════════════════════════
+       실물 AMR URDF  (3층 섀시 반영)
+
+       좌표 기준
+         base_footprint : 바닥면 (z=0)
+         base_link      : 두 바퀴 축의 중점 (바닥에서 32.5mm)
+                          → 오도메트리 정기구학의 기준점
+
+       바닥 기준 실측 높이
+         1층 판 : 66 ~ 68 mm
+         2층 판 : 108 ~ 110 mm
+         3층 판 : 150 ~ 152 mm
+         라이다 레이저 : 200 mm
+  ══════════════════════════════════════════════════════════════ -->
+
+  <!-- ── 재질 ────────────────────────────────────── -->
+  <material name="acrylic"><color rgba="0.92 0.94 0.96 0.85"/></material>
+  <material name="black">  <color rgba="0.1 0.1 0.1 1"/></material>
+  <material name="gray">   <color rgba="0.45 0.45 0.48 1"/></material>
+  <material name="blue">   <color rgba="0.1 0.35 0.75 1"/></material>
+
+  <!-- ── 기본 치수 ───────────────────────────────── -->
+  <xacro:property name="plate_x"   value="0.16"/>     <!-- 판 가로 160mm -->
+  <xacro:property name="plate_y"   value="0.16"/>     <!-- 판 세로 160mm -->
+  <xacro:property name="plate_t"   value="0.002"/>    <!-- 판 두께 2mm -->
+
+  <xacro:property name="wheel_r"   value="0.0325"/>   <!-- 바퀴 반지름 32.5mm -->
+  <xacro:property name="wheel_w"   value="0.025"/>    <!-- 바퀴 두께 25mm -->
+  <xacro:property name="caster_r"  value="0.015"/>    <!-- 캐스터 반지름 15mm -->
+
+  <!-- 섀시 중심이 바퀴축보다 15mm 뒤 (앞단→모터축 65mm, 앞단→중심 80mm) -->
+  <xacro:property name="plate_off_x" value="-0.015"/>
+
+  <!-- ── 판 중심 z (base_link 기준 = 바닥높이 - 32.5mm) ── -->
+  <xacro:property name="p1_z" value="0.0345"/>   <!-- 바닥 67mm  -->
+  <xacro:property name="p2_z" value="0.0765"/>   <!-- 바닥 109mm -->
+  <xacro:property name="p3_z" value="0.1185"/>   <!-- 바닥 151mm -->
+
+  <!-- ── 라이다 ──────────────────────────────────── -->
+  <xacro:property name="lidar_x" value="0.035"/>   <!-- 바퀴축보다 35mm 앞 -->
+  <xacro:property name="lidar_z" value="0.1675"/>  <!-- 바닥 200mm -->
+
+  <!-- ── 서포트(브라켓) ──────────────────────────── -->
+  <xacro:property name="sup_r"    value="0.003"/>   <!-- 반지름 3mm -->
+  <xacro:property name="sup_span" value="0.0775"/>  <!-- 중심→모서리 155/2 mm -->
+
+  <!-- ── 라이다 서포트(브라켓) ──────────────────────────── -->
+  <xacro:property name="sup_r"    value="0.003"/>   <!-- 반지름 3mm -->
+  <xacro:property name="sup_lidar_span" value="0.02375"/>  <!-- 중심→모서리 155/2 mm -->
+
+  <!-- 서포트 구간 (base_link 기준 중심 z / 길이) -->
+  <!-- 바닥(-0.0325) ~ 1층 아랫면(0.0335) : 길이 66mm, 중심 0.0005 -->
+  <xacro:property name="s0_z" value="0.0005"/>
+  <xacro:property name="s0_l" value="0.066"/>
+  <!-- 1층 윗면(0.0355) ~ 2층 아랫면(0.0755) : 길이 40mm, 중심 0.0555 -->
+  <xacro:property name="s1_z" value="0.0555"/>
+  <xacro:property name="s1_l" value="0.040"/>
+  <!-- 2층 윗면(0.0775) ~ 3층 아랫면(0.1175) : 길이 40mm, 중심 0.0975 -->
+  <xacro:property name="s2_z" value="0.0975"/>
+  <xacro:property name="s2_l" value="0.040"/>
+  <!-- 라이다 : 길이 20mm, 중심 0.1295 -->
+  <xacro:property name="s3_z" value="0.1295"/>
+  <xacro:property name="s3_l" value="0.020"/>
+
+  <!-- ══════════════════════════════════════════════
+       매크로: 아크릴 판
+  ══════════════════════════════════════════════ -->
+  <xacro:macro name="plate" params="name z">
+    <link name="${name}">
+      <visual>
+        <geometry><box size="${plate_x} ${plate_y} ${plate_t}"/></geometry>
+        <material name="acrylic"/>
+      </visual>
+    </link>
+    <joint name="${name}_joint" type="fixed">
+      <parent link="base_link"/>
+      <child  link="${name}"/>
+      <origin xyz="${plate_off_x} 0 ${z}" rpy="0 0 0"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- ══════════════════════════════════════════════
+       매크로: 서포트 기둥 4개 (모서리)
+  ══════════════════════════════════════════════ -->
+  <xacro:macro name="supports" params="prefix z slen">
+    <xacro:support_one name="${prefix}_fl" x="${plate_off_x + sup_span}" y="${ sup_span}" z="${z}" slen="${slen}"/>
+    <xacro:support_one name="${prefix}_fr" x="${plate_off_x + sup_span}" y="${-sup_span}" z="${z}" slen="${slen}"/>
+    <xacro:support_one name="${prefix}_bl" x="${plate_off_x - sup_span}" y="${ sup_span}" z="${z}" slen="${slen}"/>
+    <xacro:support_one name="${prefix}_br" x="${plate_off_x - sup_span}" y="${-sup_span}" z="${z}" slen="${slen}"/>
+  </xacro:macro>
+
+  <xacro:macro name="support_one" params="name x y z slen">
+    <link name="${name}">
+      <visual>
+        <geometry><cylinder radius="${sup_r}" length="${slen}"/></geometry>
+        <material name="gray"/>
+      </visual>
+    </link>
+    <joint name="${name}_joint" type="fixed">
+      <parent link="base_link"/>
+      <child  link="${name}"/>
+      <origin xyz="${x} ${y} ${z}" rpy="0 0 0"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- ══════════════════════════════════════════════
+       매크로: 라이다 서포트 기둥 4개 (모서리)
+  ══════════════════════════════════════════════ -->
+  <xacro:macro name="supports_lidar" params="prefix z slen">
+    <xacro:support_lidar_one name="${prefix}_fl" x="${lidar_x + sup_lidar_span}" y="${ sup_lidar_span}" z="${z}" slen="${slen}"/>
+    <xacro:support_lidar_one name="${prefix}_fr" x="${lidar_x + sup_lidar_span}" y="${-sup_lidar_span}" z="${z}" slen="${slen}"/>
+    <xacro:support_lidar_one name="${prefix}_bl" x="${lidar_x - sup_lidar_span}" y="${ sup_lidar_span}" z="${z}" slen="${slen}"/>
+    <xacro:support_lidar_one name="${prefix}_br" x="${lidar_x - sup_lidar_span}" y="${-sup_lidar_span}" z="${z}" slen="${slen}"/>
+  </xacro:macro>
+
+  <xacro:macro name="support_lidar_one" params="name x y z slen">
+    <link name="${name}">
+      <visual>
+        <geometry><cylinder radius="${sup_r}" length="${slen}"/></geometry>
+        <material name="black"/>
+      </visual>
+    </link>
+    <joint name="${name}_joint" type="fixed">
+      <parent link="base_link"/>
+      <child  link="${name}"/>
+      <origin xyz="${x} ${y} ${z}" rpy="0 0 0"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- ══════════════════════════════════════════════
+       base_footprint : 바닥 기준점 (odom TF가 여기 연결)
+  ══════════════════════════════════════════════ -->
+  <link name="base_footprint"/>
+
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child  link="base_link"/>
+    <origin xyz="0 0 ${wheel_r}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ══════════════════════════════════════════════
+       base_link : 바퀴 축 중점 (충돌/관성의 기준)
+       visual 없음 — 실제 외형은 3장의 판이 담당
+  ══════════════════════════════════════════════ -->
+  <link name="base_link">
+    <collision>
+      <!-- 전체 몸체를 감싸는 단순 박스 (1층 아랫면 ~ 3층 윗면) -->
+      <origin xyz="${plate_off_x} 0 0.0755" rpy="0 0 0"/>
+      <geometry><box size="${plate_x} ${plate_y} 0.086"/></geometry>
+    </collision>
+    <inertial>
+      <!-- 무게중심: 배터리(1층)가 무거우므로 낮게 -->
+      <origin xyz="${plate_off_x - 0.04} 0 0.02" rpy="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.00234" ixy="0" ixz="0"
+               iyy="0.00234" iyz="0"
+               izz="0.00427"/>
+    </inertial>
+  </link>
+
+  <!-- ── 3층 아크릴 판 ─────────────────────────── -->
+  <xacro:plate name="plate_1_link" z="${p1_z}"/>
+  <xacro:plate name="plate_2_link" z="${p2_z}"/>
+  <xacro:plate name="plate_3_link" z="${p3_z}"/>
+
+  <!-- ── 서포트 기둥 (각 층 4개씩) ─────────────── -->
+  <!-- <xacro:supports prefix="sup0" z="${s0_z}" slen="${s0_l}"/> -->
+  <xacro:supports prefix="sup1" z="${s1_z}" slen="${s1_l}"/>
+  <xacro:supports prefix="sup2" z="${s2_z}" slen="${s2_l}"/>
+
+  <!-- ── 라이다 서포트 기둥 (각 층 4개씩) ─────────────── -->
+  <xacro:supports_lidar prefix="sup_lidar" z="${s3_z}" slen="${s3_l}"/>
+
+  <!-- ══════════════════════════════════════════════
+       바퀴 (base_link 원점 높이에 위치)
+  ══════════════════════════════════════════════ -->
+  <link name="wheel_left_link">
+    <visual>
+      <geometry><cylinder radius="${wheel_r}" length="${wheel_w}"/></geometry>
+      <material name="black"/>
+    </visual>
+    <collision>
+      <geometry><cylinder radius="${wheel_r}" length="${wheel_w}"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <inertia ixx="0.0000316" ixy="0" ixz="0"
+               iyy="0.0000316" iyz="0"
+               izz="0.0000528"/>
+    </inertial>
+  </link>
+
+  <joint name="wheel_left_joint" type="continuous">
+    <parent link="base_link"/>
+    <child  link="wheel_left_link"/>
+    <origin xyz="0 ${plate_y/2 + wheel_w/2} 0" rpy="-1.5708 0 0"/>
+    <axis xyz="0 0 1"/>
+    <dynamics damping="0.1" friction="0.1"/>
+  </joint>
+
+  <link name="wheel_right_link">
+    <visual>
+      <geometry><cylinder radius="${wheel_r}" length="${wheel_w}"/></geometry>
+      <material name="black"/>
+    </visual>
+    <collision>
+      <geometry><cylinder radius="${wheel_r}" length="${wheel_w}"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.1"/>
+      <inertia ixx="0.0000316" ixy="0" ixz="0"
+               iyy="0.0000316" iyz="0"
+               izz="0.0000528"/>
+    </inertial>
+  </link>
+
+  <joint name="wheel_right_joint" type="continuous">
+    <parent link="base_link"/>
+    <child  link="wheel_right_link"/>
+    <origin xyz="0 ${-(plate_y/2 + wheel_w/2)} 0" rpy="-1.5708 0 0"/>
+    <axis xyz="0 0 1"/>
+    <dynamics damping="0.1" friction="0.1"/>
+  </joint>
+
+  <!-- ══════════════════════════════════════════════
+       캐스터 (뒤쪽) + 1층 판에서 내려오는 지지대
+  ══════════════════════════════════════════════ -->
+  <link name="caster_back_link">
+    <visual>
+      <geometry><sphere radius="${caster_r}"/></geometry>
+      <material name="black"/>
+    </visual>
+    <collision>
+      <geometry><sphere radius="${caster_r}"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.01"/>
+      <inertia ixx="0.0000009" ixy="0" ixz="0"
+               iyy="0.0000009" iyz="0"
+               izz="0.0000009"/>
+    </inertial>
+  </link>
+
+  <joint name="caster_back_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="caster_back_link"/>
+    <!-- 뒤끝에서 안쪽, 바닥에 접하도록 z = -wheel_r + caster_r -->
+    <origin xyz="${plate_off_x - plate_x/2 + caster_r} 0 ${-wheel_r + caster_r}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 캐스터 지지대: 1층 판 아랫면(0.0335) ~ 캐스터 상단(-0.0175) -->
+  <link name="caster_mount_link">
+    <visual>
+      <geometry><cylinder radius="0.004" length="0.051"/></geometry>
+      <material name="gray"/>
+    </visual>
+  </link>
+  <joint name="caster_mount_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="caster_mount_link"/>
+    <origin xyz="${plate_off_x - plate_x/2 + caster_r} 0 0.008" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ══════════════════════════════════════════════
+       라이다 (3층 판 위) — 레이저 원점 = base_scan
+  ══════════════════════════════════════════════ -->
+  <link name="base_scan">
+    <visual>
+      <!-- 몸통을 레이저면 아래로 내려 그림 -->
+      <origin xyz="0 0 -0.014" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0375" length="0.028"/></geometry>
+      <material name="blue"/>
+    </visual>
+    <inertial>
+      <mass value="0.15"/>
+      <inertia ixx="0.0000679" ixy="0" ixz="0"
+               iyy="0.0000679" iyz="0"
+               izz="0.0000919"/>
+    </inertial>
+  </link>
+
+  <joint name="scan_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="base_scan"/>
+    <origin xyz="${lidar_x} 0 ${lidar_z}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ══════════════════════════════════════════════
+       ▼ Gazebo 전용 (robot_state_publisher는 무시)
+         시뮬레이션 겸용으로 유지
+  ══════════════════════════════════════════════ -->
+  <gazebo>
+    <plugin name="differential_drive_controller"
+            filename="libgazebo_ros_diff_drive.so">
+      <left_joint>wheel_left_joint</left_joint>
+      <right_joint>wheel_right_joint</right_joint>
+      <wheel_separation>0.185</wheel_separation>
+      <wheel_diameter>0.065</wheel_diameter>
+      <max_wheel_torque>2.0</max_wheel_torque>
+      <max_wheel_acceleration>1.0</max_wheel_acceleration>
+      <command_topic>cmd_vel</command_topic>
+      <odometry_topic>odom</odometry_topic>
+      <odometry_frame>odom</odometry_frame>
+      <robot_base_frame>base_footprint</robot_base_frame>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+      <publish_wheel_tf>true</publish_wheel_tf>
+      <update_rate>100</update_rate>
+    </plugin>
+  </gazebo>
+
+  <gazebo>
+    <plugin name="joint_state_publisher"
+            filename="libgazebo_ros_joint_state_publisher.so">
+      <joint_name>wheel_left_joint</joint_name>
+      <joint_name>wheel_right_joint</joint_name>
+    </plugin>
+  </gazebo>
+
+  <gazebo reference="base_scan">
+    <sensor name="lidar" type="ray">
+      <always_on>true</always_on>
+      <visualize>true</visualize>
+      <update_rate>8</update_rate>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>360</samples>
+            <resolution>1.0</resolution>
+            <min_angle>-3.14159</min_angle>
+            <max_angle>3.14159</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.12</min>
+          <max>8.0</max>
+          <resolution>0.015</resolution>
+        </range>
+        <noise>
+          <type>gaussian</type>
+          <mean>0.0</mean>
+          <stddev>0.01</stddev>
+        </noise>
+      </ray>
+      <plugin name="lidar_plugin" filename="libgazebo_ros_ray_sensor.so">
+        <ros><remapping>~/out:=scan</remapping></ros>
+        <output_type>sensor_msgs/LaserScan</output_type>
+        <frame_name>base_scan</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+  <gazebo reference="base_link">
+    <linearDamping>1.5</linearDamping>
+    <angularDamping>0.5</angularDamping>
+  </gazebo>
+
+  <gazebo reference="caster_back_link">
+    <mu1>0.5</mu1><mu2>0.5</mu2>
+    <kp>100000.0</kp><kd>200.0</kd>
+    <minDepth>0.001</minDepth><maxVel>0.1</maxVel>
+  </gazebo>
+
+  <gazebo reference="wheel_left_link">
+    <mu1>100000.0</mu1><mu2>100000.0</mu2>
+    <kp>1000000.0</kp><kd>100.0</kd>
+  </gazebo>
+
+  <gazebo reference="wheel_right_link">
+    <mu1>100000.0</mu1><mu2>100000.0</mu2>
+    <kp>1000000.0</kp><kd>100.0</kd>
+  </gazebo>
+
+</robot>
