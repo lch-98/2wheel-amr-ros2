@@ -45,11 +45,9 @@
 - 모터드라이버:  MDD10A
 - 보조배터리:   VOVA PD 22.5W
 - 모터전원:     리튬이온배터리 3구
-<br>
 
 ### 제어 구조
 <img width="1360" height="867" alt="1784736149446" src="https://github.com/user-attachments/assets/58b8942c-9393-4e6b-9252-99fa08f88767" />
-
 
 ### 실행 영상 (이미지를 클릭하면 시연 영상으로 이동합니다.)
 <a href="https://blog.naver.com/dlcndgusgnss/224353754456">
