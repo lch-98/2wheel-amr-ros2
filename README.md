@@ -203,9 +203,8 @@ ros2 run my_robot ydlidar_node --ros-args -p port:=/dev/ttyUSB1
 
 **[Pi] 터미널 4 — 지도 그리기 시작**
 ```bash
-ros2 launch slam_toolbox online_async_launch.py \
-    slam_params_file:=$(ros2 pkg prefix my_robot)/share/my_robot/config/slam_params.yaml \
-    use_sim_time:=false
+ros2 run slam_toolbox async_slam_toolbox_node \
+    --ros-args --params-file $(ros2 pkg prefix my_robot)/share/my_robot/config/slam_params.yaml
 ```
 - 실물은 라이다 노이즈/오도메트리 오차 때문에 **커스텀** `slam_params.yaml`을 반드시 지정합니다.
 
