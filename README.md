@@ -91,6 +91,7 @@
 │
 └── docs/                              # COLCON_IGNORE — 발표자료, 사진 등
 ```
+---
 
 ## 2. 사전 준비
 
@@ -111,6 +112,7 @@ sudo make install
 # /usr/local/lib/libydlidar_sdk.a, /usr/local/include 에 설치되는지 확인
 ls /usr/local/lib/ | grep ydlidar
 ```
+---
 
 ## 3. 빌드
 
