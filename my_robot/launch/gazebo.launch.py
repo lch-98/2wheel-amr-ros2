@@ -7,7 +7,7 @@ from launch_ros.actions import Node
 import xacro
 
 def generate_launch_description():
-    pkg_path = get_package_share_directory('my_robot_description')
+    pkg_path = get_package_share_directory('my_robot')
     urdf_file = os.path.join(pkg_path, 'urdf', 'my_robot.urdf.xacro')
     robot_desc = xacro.process_file(urdf_file).toxml()
 
@@ -15,10 +15,16 @@ def generate_launch_description():
         get_package_share_directory('turtlebot3_gazebo'),
         'models'
     )
-
+    
+    default_world = os.path.join(
+        get_package_share_directory('turtlebot3_gazebo'),
+        'worlds',
+        'turtlebot3_world.world'
+    )
+    
     world_arg = DeclareLaunchArgument(
         'world',
-        default_value='',
+        default_value=default_world,
         description='Gazebo world file path'
     )
     world = LaunchConfiguration('world')

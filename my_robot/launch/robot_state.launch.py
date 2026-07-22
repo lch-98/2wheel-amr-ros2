@@ -6,7 +6,7 @@ import xacro
 
 
 def generate_launch_description():
-    pkg = get_package_share_directory('my_robot_description')
+    pkg = get_package_share_directory('my_robot')
     xacro_file = os.path.join(pkg, 'urdf', 'my_robot.urdf.xacro')
     robot_desc = xacro.process_file(xacro_file).toxml()
 
