@@ -1,16 +1,16 @@
 # 2-Wheel Differential Drive AMR (ROS2 Humble)
 
-2륜 차동구동(differential drive) 자율이동로봇을 직접 설계·제작한 프로젝트입니다.
+2륜 차동구동(differential drive) 자율이동로봇을 직접 설계·제작한 프로젝트입니다.<br>
 **시뮬레이션에서 지도를 그리고 자율주행 → 실물 로봇에서 지도를 그리고 자율주행**까지의 전체 과정을 다룹니다.
 
 ```
-                 [ 로봇의 몸체 역할 ]                [ 그 위에 얹히는 두뇌 ]
-시뮬레이션 :  Gazebo (가상 물리엔진)        →   slam_toolbox 기본 파라미터 (지도 그리기)
-              + robot_state_publisher          my_nav2_params.yaml (자율주행)
+                 [ 로봇의 몸체 역할 ]                      [ 그 위에 얹히는 두뇌 ]
+시뮬레이션 :  Gazebo (가상 물리엔진)              →      slam_toolbox 기본 파라미터 (지도 그리기)
+              + robot_state_publisher               my_nav2_params.yaml (자율주행)
               + teleop_twist_keyboard (표준 패키지)
 
-실물 로봇  :  base_controller.py (모터 구동)    →   slam_params.yaml (지도 그리기, 커스텀)
-              + ydlidar_node (라이다)                my_nav2_params_real.yaml (자율주행)
+실물 로봇  :  base_controller.py (모터 구동)     →      slam_params.yaml (지도 그리기, 커스텀)
+              + ydlidar_node (라이다)                 my_nav2_params_real.yaml (자율주행)
               + Arduino 펌웨어
               + robot_state.launch.py
               + keyboard_teleop.py (커스텀)
@@ -20,6 +20,7 @@
 
 ## 목차
 
+0. [활용 플랫폼, 제어 구조 및 실행 영상](#0-활용-플랫폼-제어-구조-및-실행-영상)
 1. [리포지토리 구조](#1-리포지토리-구조)
 2. [사전 준비](#2-사전-준비)
 3. [빌드](#3-빌드)
@@ -32,40 +33,65 @@
 10. [트러블슈팅](#10-트러블슈팅)
 
 ---
+## 0. 활용 플랫폼, 제어 구조 및 실행 영상
+
+### 활용 플랫폼 (자체 제작)
+<img width="966" height="1173" alt="로봇실사진" src="https://github.com/user-attachments/assets/a0a22a08-7569-4268-97eb-6ad8b9c7d071" />
+
+- 메인제어기:   Raspberry pi4 8gb
+- 하위제어기:   Arduino Mega 2560
+- 라이다센서:   YDLidar X4
+- 엔코더모터:   JGB37-520
+- 모터드라이버:  MDD10A
+- 보조배터리:   VOVA PD 22.5W
+- 모터전원:     리튬이온배터리 3구
+<br>
+
+### 제어 구조
+<img width="1360" height="867" alt="1784736149446" src="https://github.com/user-attachments/assets/58b8942c-9393-4e6b-9252-99fa08f88767" />
+
+
+### 실행 영상 (이미지를 클릭하면 시연 영상으로 이동합니다.)
+<a href="https://blog.naver.com/dlcndgusgnss/224353754456">
+  <img src="https://github.com/user-attachments/assets/bad077b1-2e96-4435-87e2-94bde6b8863d" width="700">
+</a>
+
+
+---
 
 ## 1. 리포지토리 구조
 
 ```
-2wheel-amr-ros2/                 (= ~/robot_ws/src 그 자체)
-├── my_robot/                    # ROS2 패키지 (ament_cmake + ament_cmake_python)
+2wheel-amr-ros2/                       (= ~/robot_ws/src 그 자체)
+├── my_robot/                          # ROS2 패키지 (ament_cmake + ament_cmake_python)
 │   ├── package.xml
 │   ├── CMakeLists.txt
 │   ├── urdf/
 │   │   └── my_robot.urdf.xacro
 │   ├── launch/
-│   │   ├── gazebo.launch.py        # Gazebo 실행 + 로봇 스폰 (시뮬 전용)
-│   │   └── robot_state.launch.py   # URDF → TF 발행 (공통)
+│   │   ├── gazebo.launch.py           # Gazebo 실행 + 로봇 스폰 (시뮬 전용)
+│   │   └── robot_state.launch.py      # URDF → TF 발행 (공통)
 │   ├── config/
 │   │   ├── slam_params.yaml           # 실물 전용 커스텀 SLAM 설정
 │   │   ├── my_nav2_params.yaml        # Nav2 설정 (시뮬용)
 │   │   └── my_nav2_params_real.yaml   # Nav2 설정 (실물용)
-│   ├── my_robot/                   # 파이썬 노드
+│   ├── my_robot/                      # 파이썬 노드
 │   │   ├── base_controller.py         # 모터 구동 + odom 계산 (실물 전용)
 │   │   └── keyboard_teleop.py         # 커스텀 teleop (실물 전용)
 │   └── src/
-│       └── ydlidar_node.cpp        # YDLIDAR 드라이버, 공식 SDK 링크 (실물 전용)
+│       └── ydlidar_node.cpp           # YDLIDAR 드라이버, 공식 SDK 링크 (실물 전용)
 │
-├── firmware/                    # Arduino 코드 (COLCON_IGNORE — colcon 빌드 대상 아님)
+├── firmware/                          # Arduino 코드 (COLCON_IGNORE — colcon 빌드 대상 아님)
 │   ├── EncoderTest_JGB37520/
 │   ├── MotorTest_JGB37520/
 │   ├── MotorEncoderTest_JGB37520/
-│   └── MotorJGB37520_Firmware/     # 실사용 최종 펌웨어
+│   └── MotorJGB37520_Firmware/        # 실사용 최종 펌웨어
 │
-├── maps/                         # COLCON_IGNORE — SLAM으로 그린 지도 저장소
+├── maps/                              # COLCON_IGNORE — SLAM으로 그린 지도 저장소
 │   ├── sim/
 │   └── real/
 │
-└── docs/                          # COLCON_IGNORE — 발표자료, 사진 등
+└── docs/                              # COLCON_IGNORE — 발표자료, 사진 등
 ```
 
 ## 2. 사전 준비
@@ -76,7 +102,7 @@ sudo apt install ros-humble-navigation2 ros-humble-nav2-bringup \
                  ros-humble-teleop-twist-keyboard
 ```
 
-**⚠️ YDLIDAR 공식 SDK는 별도로 미리 빌드해두셔야 합니다** (`ydlidar_node`가 이걸 링크합니다):
+**YDLIDAR 공식 SDK는 별도로 미리 빌드해두셔야 합니다** (`ydlidar_node`가 이걸 링크합니다)
 ```bash
 git clone https://github.com/YDLIDAR/YDLidar-SDK.git
 cd YDLidar-SDK
@@ -122,7 +148,7 @@ ros2 launch my_robot gazebo.launch.py
 ```bash
 ros2 launch slam_toolbox online_async_launch.py use_sim_time:=true
 ```
-- 파라미터 파일 없이 `slam_toolbox` 기본값으로 실행합니다. Gazebo의 가상 라이다/odom은 노이즈가 거의 없어서 기본값으로 충분합니다.
+- 파라미터 파일 없이 `slam_toolbox` 기본값으로 실행합니다.<br>Gazebo의 가상 라이다/odom은 노이즈가 거의 없어서 기본값으로 충분합니다.
 
 **터미널 3 — 로봇 조종해서 맵 채우기**
 ```bash
@@ -160,9 +186,7 @@ ros2 launch nav2_bringup bringup_launch.py \
     map:=$HOME/robot_ws/src/maps/sim/my_robot_map.yaml \
     params_file:=$(ros2 pkg prefix my_robot)/share/my_robot/config/my_nav2_params.yaml
 ```
-- AMCL 초기 위치는 `my_nav2_params.yaml` 안에 `initial_pose.x=-2.0`, `initial_pose.y=-0.5`, `initial_pose.yaw=0.0`로 스폰 위치와 맞춰져 있습니다.
-
-  ⚠️ 파라미터 키는 `initial_pose_x`가 아니라 **점(`.`) 표기**인 `initial_pose.x`여야 합니다.
+- AMCL 초기 위치는 `my_nav2_params.yaml` 안에 `initial_pose.x=-2.0`, `initial_pose.y=-0.5`, `initial_pose.yaw=0.0`로 스폰 위치와 맞춰져 있습니다.<br> 파라미터 키는 `initial_pose_x`가 아니라 **점(`.`) 표기**인 `initial_pose.x`여야 합니다.
 
 **터미널 3 — RViz에서 목표 지점 클릭**
 ```bash
