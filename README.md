@@ -249,7 +249,7 @@ sudo dmesg | tail -20
 Ubuntu 22.04(커널 5.15)에서는 xpad가 이 ID를 몰라서 X-input 인터페이스에 드라이버가 안 붙습니다.
 
 ```bash
-uname -r        # 6.15 미만이면 아래 등록 필요
+uname -r                    # 6.15 미만이면 아래 등록 필요
 sudo modprobe xpad
 echo "2dc8 310b" | sudo tee /sys/bus/usb/drivers/xpad/new_id
 ls -l /dev/input/js0        # 생성되면 성공
@@ -284,7 +284,7 @@ WantedBy=multi-user.target
 (`jstest`가 읽는 `/dev/input/js0`은 others 읽기가 열려 있어서, jstest는 되는데 joy_node만 안 되는 상황이 흔합니다.)
 
 ```bash
-groups                      # input 이 목록에 있는지 확인
+groups                        # input 이 목록에 있는지 확인
 sudo usermod -aG input $USER
 # 로그아웃 후 재로그인 필요
 ```
@@ -317,8 +317,8 @@ ros2 launch my_robot joy_teleop.launch.py
 노드 구성:
 ```
 joy_node → /joy → teleop_twist_joy → /cmd_vel_joy ─┐
-                                                    ├─ twist_mux → /cmd_vel
-             (향후) Nav2 → /cmd_vel_nav ────────────┘
+                                                   ├─ twist_mux → /cmd_vel
+                        (향후) Nav2 → /cmd_vel_nav ─┘
 ```
 
 `twist_mux`는 조이스틱(priority 100)을 Nav2(priority 10)보다 우선하도록 설정되어 있어,<br>
