@@ -504,7 +504,7 @@ EKF 도입 후에는 **EKF가 이 TF를 발행**하고, `base_controller`는 `/o
 ```
 [EKF 도입 후 — 입력 2개가 EKF로 모이고, EKF가 두 가지를 별도로 출력]
 
-  base_controller ──(/odom, TF 발행 안 함)──┐
+  base_controller ──(/odom, TF 발행 안 함)────┐
                                             ├──▶ EKF ──┬──▶ /odometry/filtered  (융합 오도메트리 토픽)
   imu_node ────────(/imu/data_raw)──────────┘          └──▶ odom → base_footprint (TF)
 ```
@@ -653,8 +653,8 @@ velocity_smoother가 내는 `/cmd_vel`을 twist_mux의 navigation 입력으로 �
 
 ```
 Nav2 controller_server → /cmd_vel_nav → velocity_smoother → /cmd_vel ─┐ (navigation, priority 10)
-                                                                       ├─ twist_mux → /cmd_vel_out → base_controller
-조이스틱 teleop ─────────────────────────────────→ /cmd_vel_joy ──────┘ (joystick, priority 100)
+                                                                      ├─ twist_mux → /cmd_vel_out → base_controller
+조이스틱 teleop ─────────────────────────────────→ /cmd_vel_joy ────────┘ (joystick, priority 100)
 ```
 
 이 배선을 위한 설정:
