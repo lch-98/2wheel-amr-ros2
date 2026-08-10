@@ -1,0 +1,36 @@
+ekf_filter_node:
+  ros__parameters:
+    frequency: 30.0
+    sensor_timeout: 0.1
+    two_d_mode: true              # 지상 주행 로봇 → z, roll, pitch 무시 (필수)
+    transform_time_offset: 0.0
+    transform_timeout: 0.0
+    publish_tf: true              # EKF가 odom → base_footprint TF 발행
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_footprint    # ← base_controller와 일치시킴 (중요!)
+    world_frame: odom
+
+    # ── 바퀴 오도메트리 ──────────────────────
+    odom0: /odom
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  false, false,    # vx (전진 선속도)만 사용
+                   false, false, false,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+
+    # ── IMU (MPU6050) ────────────────────────
+    imu0: /imu/data_raw
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,      # vyaw (자이로 z, 회전 각속도)만 사용
+                  false, false, false]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_queue_size: 10
+    imu0_remove_gravitational_acceleration: true

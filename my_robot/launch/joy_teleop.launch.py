@@ -21,5 +21,7 @@ def generate_launch_description():
         Node(package='twist_mux', executable='twist_mux',
              name='twist_mux',
              parameters=[mux_params],
-             remappings=[('/cmd_vel_out', '/cmd_vel')]),
+             # remappings=[('/cmd_vel_out', '/cmd_vel')]
+             # 위 remappings 주석! → 기본 출력 /cmd_vel_out 그대로 사용
+             ),
     ])

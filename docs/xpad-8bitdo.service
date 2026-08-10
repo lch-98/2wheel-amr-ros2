@@ -1,0 +1,11 @@
+[Unit]
+Description=Register 8BitDo Ultimate 2 Wireless with xpad driver
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'modprobe xpad && echo "2dc8 310b" > /sys/bus/usb/drivers/xpad/new_id'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

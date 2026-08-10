@@ -4,8 +4,8 @@ twist_mux:
       joystick:
         topic: /cmd_vel_joy
         timeout: 0.5
-        priority: 100         # 사람이 개입하면 무조건 우선
+        priority: 100      # 사람이 개입하면 무조건 우선
       navigation:
-        topic: /cmd_vel_nav
+        topic: /cmd_vel    # ← /cmd_vel_nav 에서 변경 (velocity_smoother 출력)
         timeout: 0.5
         priority: 10

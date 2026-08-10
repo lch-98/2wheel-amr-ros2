@@ -12,7 +12,7 @@ find_package(rclpy REQUIRED)
 find_package(sensor_msgs REQUIRED)
 
 install(
-  DIRECTORY urdf launch config
+  DIRECTORY urdf launch config rviz
   DESTINATION share/${PROJECT_NAME}
 )
 
@@ -38,6 +38,7 @@ ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   my_robot/base_controller.py
   my_robot/keyboard_teleop.py
+  my_robot/imu_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
