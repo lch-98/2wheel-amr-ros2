@@ -1,0 +1,55 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 50   # Hz — STM32 제어주기 20ms 와 맞춤
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    diff_drive_controller:
+      type: diff_drive_controller/DiffDriveController
+
+diff_drive_controller:
+  ros__parameters:
+    left_wheel_names:  ["wheel_left_joint"]
+    right_wheel_names: ["wheel_right_joint"]
+
+    # 로봇 물리 스펙
+    wheel_separation: 0.185      # body_y/2 + wheel_w/2 = 0.0925 × 2
+    wheel_radius: 0.0325         # 65mm 지름의 절반
+
+    wheel_separation_multiplier: 1.0
+    left_wheel_radius_multiplier: 1.0
+    right_wheel_radius_multiplier: 1.0
+
+    # 퍼블리시 설정
+    publish_rate: 50.0
+    odom_frame_id: odom
+    base_frame_id: base_footprint
+    pose_covariance_diagonal:  [0.001, 0.001, 0.001, 0.001, 0.001, 0.01]
+    twist_covariance_diagonal: [0.001, 0.001, 0.001, 0.001, 0.001, 0.01]
+
+    open_loop: false             # 엔코더 피드백으로 오도메트리 계산
+    position_feedback: false     # 우리는 속도만 피드백 (position 은 아직 0)
+    enable_odom_tf: false        # EKF가 TF 발행         # odom → base_footprint TF 발행
+
+    cmd_vel_timeout: 1.0         # 명령 끊기면 정지 (안전장치)
+    use_stamped_vel: false
+
+    # 속도/가속 제한
+    linear:
+      x:
+        has_velocity_limits: true
+        max_velocity: 0.5        # MAX_TARGET_VEL 과 동일
+        min_velocity: -0.5
+        has_acceleration_limits: true
+        max_acceleration: 1.0
+        min_acceleration: -1.0
+
+    angular:
+      z:
+        has_velocity_limits: true
+        max_velocity: 2.0
+        min_velocity: -2.0
+        has_acceleration_limits: true
+        max_acceleration: 3.0
+        min_acceleration: -3.0

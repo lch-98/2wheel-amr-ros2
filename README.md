@@ -11,7 +11,7 @@
 
 실물 로봇  :  base_controller.py (모터 구동)     →      slam_params.yaml (지도 그리기, 커스텀)
               + ydlidar_node (라이다)                 my_nav2_params_real.yaml (자율주행)
-              + Arduino 펌웨어
+              + Arduino 펌웨어 (STM32 가능: CANopen)
               + imu_node.py (MPU6050) + EKF 융합
               + robot_state.launch.py
               + keyboard_teleop.py (커스텀)
@@ -39,8 +39,9 @@
 10. [G. 실물 — 통합 Launch 파일 & RViz 설정](#10-g-실물--통합-launch-파일--rviz-설정)
 11. [H. 실물 — 지도 그리기 (SLAM)](#11-h-실물--지도-그리기-slam)
 12. [I. 실물 — Nav2 자율주행](#12-i-실물--nav2-자율주행)
-13. [하드웨어 스펙 & 파라미터](#13-하드웨어-스펙--파라미터)
-14. [트러블슈팅](#14-트러블슈팅)
+13. [J. 실물 — Arduino Serial → STM32 + CANopen 마이그레이션](#13-j-실물--arduino-serial--stm32--canopen-마이그레이션)
+14. [하드웨어 스펙 & 파라미터](#14-하드웨어-스펙--파라미터)
+15. [트러블슈팅](#15-트러블슈팅)
 
 ---
 ## 0. 활용 플랫폼, 제어 구조 및 실행 영상
@@ -49,7 +50,7 @@
 <img width="966" height="1173" alt="로봇실사진" src="https://github.com/user-attachments/assets/a0a22a08-7569-4268-97eb-6ad8b9c7d071" />
 
 - 메인제어기:   Raspberry pi4 8gb
-- 하위제어기:   Arduino Mega 2560
+- 하위제어기:   Arduino Mega 2560 (STM32 가능: CANopen)
 - 라이다센서:   YDLidar X4
 - IMU 센서:    MPU6050 (6축, I2C)
 - 엔코더모터:   JGB37-520
@@ -72,41 +73,70 @@
 ## 1. 리포지토리 구조
 
 ```
-2wheel-amr-ros2/                       (= ~/robot_ws/src 그 자체)
-├── my_robot/                          # ROS2 패키지 (ament_cmake + ament_cmake_python)
+2wheel-amr-ros2/                        (= ~/robot_ws/src 그 자체)
+├── my_robot/                            # ROS2 패키지 (ament_cmake + ament_cmake_python)
 │   ├── package.xml
 │   ├── CMakeLists.txt
 │   ├── urdf/
-│   │   └── my_robot.urdf.xacro
+│   │   ├── my_robot.urdf.xacro
+│   │   └── my_robot_ros2_control.xacro  # <ros2_control> 태그 (use_ros2_control:=true 일 때)
 │   ├── launch/
-│   │   ├── gazebo.launch.py           # Gazebo 실행 + 로봇 스폰 (시뮬 전용)
-│   │   ├── robot_state.launch.py      # URDF → TF 발행 (실물에서 bringup이 호출; 시뮬은 gazebo.launch.py에 포함)
-│   │   ├── joy_teleop.launch.py       # 조이스틱 teleop (실물 전용)
-│   │   ├── bringup_real.launch.py     # 실물 통합: 하드웨어 + IMU + EKF + 조이스틱
-│   │   ├── mapping.launch.py          # bringup + SLAM (실물 지도 그리기)
-│   │   └── navigation.launch.py       # bringup + Nav2 (실물 자율주행)
+│   │   ├── gazebo.launch.py               # Gazebo 실행 + 로봇 스폰 (시뮬 전용)
+│   │   ├── robot_state.launch.py          # URDF → TF 발행 (실물에서 arduino bringup이 호출 / 시뮬은 gazebo.launch.py에 포함)
+│   │   ├── joy_teleop.launch.py           # 조이스틱 teleop (실물 전용)
+│   │   ├── robot_control.launch.py        # ros2_control + diff_drive_controller (J단계)
+│   │   ├── bringup_real_stm32.launch.py   # 실물 통합 (STM32+CANopen): robot_control + IMU + EKF + 라이다 + 조이스틱
+│   │   ├── bringup_real_arduino.launch.py # 실물 통합 (Arduino Serial): robot_state + base_controller + …
+│   │   ├── mapping.launch.py              # bringup + SLAM     (base:=stm32|arduino)
+│   │   └── navigation.launch.py           # bringup + Nav2     (base:=stm32|arduino)
 │   ├── config/
 │   │   ├── slam_params.yaml           # 실물 전용 커스텀 SLAM 설정
 │   │   ├── my_nav2_params.yaml        # Nav2 설정 (시뮬용)
 │   │   ├── my_nav2_params_real.yaml   # Nav2 설정 (실물용)
 │   │   ├── joy_teleop.yaml            # 조이스틱 축·버튼 매핑 및 속도 스케일
 │   │   ├── twist_mux.yaml             # cmd_vel 소스 우선순위 (joystick 100 / navigation 10 → /cmd_vel_out)
-│   │   └── ekf.yaml                   # robot_localization EKF 설정 (바퀴+IMU 융합)
+│   │   ├── ekf.yaml                   # robot_localization EKF 설정 (바퀴+IMU 융합)
+│   │   └── my_robot_controllers.yaml  # ros2_control 컨트롤러 설정 (J단계)
 │   ├── rviz/
 │   │   ├── mapping.rviz               # 지도 그리기용 RViz 구성
 │   │   └── nav.rviz                   # 자율주행 확인용 RViz 구성 (QoS·색상 저장)
 │   ├── my_robot/                      # 파이썬 노드
-│   │   ├── base_controller.py         # 모터 구동 + odom 계산 (실물 전용)
+│   │   ├── base_controller.py         # 모터 구동 + odom 계산 (실물 전용 - arduino 전용)
 │   │   ├── imu_node.py                # MPU6050 IMU 드라이버 (실물 전용)
-│   │   └── keyboard_teleop.py         # 커스텀 teleop (실물 전용)
+│   │   └── keyboard_teleop.py         # 커스텀 teleop (실물 전용 - arduino 전용)
 │   └── src/
 │       └── ydlidar_node.cpp           # YDLIDAR 드라이버, 공식 SDK 링크 (실물 전용)
 │
-├── firmware/                          # Arduino 코드 (COLCON_IGNORE — colcon 빌드 대상 아님)
-│   ├── EncoderTest_JGB37520/
-│   ├── MotorTest_JGB37520/
-│   ├── MotorEncoderTest_JGB37520/
-│   └── MotorJGB37520_Firmware/        # 실사용 최종 펌웨어
+├── my_dual_axis_driver/               # ROS2 패키지 — 커스텀 다축 CANopen 드라이버 (J단계)
+│   ├── package.xml
+│   ├── CMakeLists.txt
+│   ├── dual_axis_hardware.xml         # ros2_control 하드웨어 플러그인 설명
+│   ├── include/my_dual_axis_driver/
+│   │   ├── dual_axis_driver.hpp       # ROS2 컴포넌트 껍데기 (CanopenDriver 상속)
+│   │   ├── dual_axis_system.hpp       # hardware_interface::SystemInterface
+│   │   └── node_interfaces/
+│   │       ├── node_canopen_dual_axis_driver.hpp       # 두뇌 선언 (Proxy 상속)
+│   │       └── node_canopen_dual_axis_driver_impl.hpp  # 두뇌 구현 (템플릿)
+│   └── src/
+│       ├── node_canopen_dual_axis_driver.cpp           # 명시적 인스턴스화
+│       ├── dual_axis_driver.cpp                        # 컴포넌트 등록
+│       └── dual_axis_system.cpp                        # 플러그인 등록
+│
+├── my_robot_canopen/                  # ROS2 패키지 — CANopen 버스 설정
+│   ├── config/my_robot/
+│   │   ├── bus.yml                    # 노드·PDO 매핑 정의 (dcfgen 입력)
+│   │   ├── my_robot.eds               # STM32 OD 명세 (rww / $NODEID 후처리 완료)
+│   │   └── master.dcf, motor.bin      # dcfgen -r 산출물
+│   └── launch/
+│       └── my_robot_canopen.launch.py # 드라이버 단독 실행 (ros2_control 없이 검증용)
+│
+├── firmware/                          # 펌웨어 (COLCON_IGNORE — colcon 빌드 대상 아님)
+│   ├── EncoderTest_JGB37520/          # [Arduino] 엔코더 방향 확인
+│   ├── MotorTest_JGB37520/            # [Arduino] 모터 구동 확인
+│   ├── MotorEncoderTest_JGB37520/     # [Arduino] 통합 확인
+│   ├── MotorJGB37520_Firmware/        # [Arduino] 실사용 최종 펌웨어 (구버전)
+│   └── STM32_CANopen/
+│       └── main.c                     # [STM32] CANopenNode + CiA402 2축 펌웨어 (현행)
 │
 ├── maps/                              # COLCON_IGNORE — SLAM으로 그린 지도 저장소
 │   ├── sim/
@@ -127,6 +157,38 @@ sudo apt install ros-humble-navigation2 ros-humble-nav2-bringup \
                  ros-humble-joy ros-humble-teleop-twist-joy ros-humble-twist-mux \
                  ros-humble-robot-localization \
                  i2c-tools python3-smbus2
+```
+
+**J단계(STM32 + CANopen)를 사용하는 경우 추가로 설치하세요.**
+Arduino 구성(A~I단계)만 재현한다면 이 블록은 건너뛰어도 됩니다.
+
+```bash
+# CANopen 스택 — 메타패키지 하나로 전체가 설치됩니다 (개별 설치 불필요)
+sudo apt install ros-humble-canopen
+
+# ros2_control + 차동구동 컨트롤러
+sudo apt install ros-humble-ros2-control ros-humble-ros2-controllers \
+                 ros-humble-diff-drive-controller ros-humble-ros2controlcli
+
+# CAN 진단 도구 (candump / cansend)
+sudo apt install can-utils
+
+# 무선 원격 시각화 시 권장 — Pi와 PC 양쪽에 설치·설정
+sudo apt install ros-humble-rmw-cyclonedds-cpp
+echo 'export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp' >> ~/.bashrc
+```
+
+> `ros-humble-canopen`이 `canopen_core`·`canopen_402_driver`·`canopen_ros2_control` 등을 모두 끌어옵니다.
+> CycloneDDS는 **Pi와 PC 양쪽 모두** 같은 설정이어야 통신됩니다(한쪽만 바꾸면 연결이 끊깁니다).
+
+**설치 확인**
+```bash
+ros2 pkg list | grep canopen
+# canopen, canopen_402_driver, canopen_base_driver, canopen_core,
+# canopen_interfaces, canopen_master_driver, canopen_proxy_driver,
+# canopen_ros2_control, canopen_ros2_controllers ... 가 보이면 정상
+
+ros2 control list_controller_types | grep diff_drive
 ```
 
 **IMU(MPU6050)를 쓰려면 라즈베리파이에서 I2C를 활성화하세요:**
@@ -563,12 +625,13 @@ ros2 run tf2_tools view_frames    # odom 프레임이 30Hz(=EKF frequency)면 �
 
 ### G-1. 통합 Launch 파일 구조
 
-공통 부분(하드웨어 + IMU + EKF + 조이스틱)을 `bringup_real.launch.py`로 묶고,
+공통 부분(하드웨어 + IMU + EKF + 조이스틱)을 `bringup_real.launch.py`(STM32 or Arduino)로 묶고,
 그 위에 SLAM 또는 Nav2를 얹는 계층 구조입니다. **`publish_tf:=false`와 포트 기본값(`/dev/arduino`,
 `/dev/ydlidar`)이 이미 반영**되어 있어, D단계(udev)만 되어 있으면 한 줄로 실행됩니다.
 
 ```
 bringup_real.launch.py  = robot_state + base_controller(publish_tf=false) + imu + ekf + ydlidar + joy_teleop
+(STM32 or Arduino)
 mapping.launch.py       = bringup_real + slam_toolbox
 navigation.launch.py    = bringup_real + nav2 (map 기본값: maps/real/my_real_map.yaml)
 ```
@@ -598,6 +661,27 @@ rviz2 -d $(ros2 pkg prefix my_robot)/share/my_robot/rviz/nav.rviz
 
 > 시작 전 [Pi]에서 `cd ~/robot_ws && source install/setup.bash`를 실행하세요.
 > D단계(udev 포트 고정)가 되어 있어야 launch 기본값(`/dev/arduino`, `/dev/ydlidar`)이 동작합니다.
+
+> ### 구동 계층 선택 (`base:=`)
+>
+> `mapping.launch.py`·`navigation.launch.py`는 하부 구동 계층을 인자로 선택합니다.
+>
+> | 값 | 하부 계층 | 실행되는 bringup |
+> |---|---|---|
+> | `stm32` (기본값) | STM32 + CANopen (J단계) | `bringup_real_stm32.launch.py` |
+> | `arduino` | Arduino Serial (C단계) | `bringup_real_arduino.launch.py` |
+>
+> ```bash
+> ros2 launch my_robot mapping.launch.py                 # STM32 (기본)
+> ros2 launch my_robot mapping.launch.py base:=arduino   # Arduino
+> ```
+>
+> 두 bringup은 각자 필요한 노드를 온전히 포함하므로 추가 인자가 필요 없습니다.
+> - **Arduino**: `robot_state.launch.py`(`robot_state_publisher` + `joint_state_publisher`) + `base_controller.py`
+> - **STM32**: `robot_control.launch.py`(`robot_state_publisher` + `joint_state_broadcaster` + `diff_drive_controller`)
+>
+> 잘못된 값(예: `base:=foo`)을 주면 두 조건 모두 거짓이 되어 **하드웨어가 아무것도 뜨지 않습니다.**
+> 하드웨어 로그가 보이지 않으면 오타를 먼저 의심하세요.
 
 **[Pi] — 한 줄로 실행 (하드웨어 + IMU + EKF + 조이스틱 + SLAM)**
 ```bash
@@ -629,7 +713,7 @@ ros2 run nav2_map_server map_saver_cli -f ~/robot_ws/src/maps/real/my_real_map
 ros2 launch my_robot navigation.launch.py
 # 다른 지도를 쓰려면: ros2 launch my_robot navigation.launch.py map:=/절대경로/다른맵.yaml
 ```
-- 지도 기본값은 `~/robot_ws/src/maps/real/my_real_map.yaml`입니다 (G 단계에서 저장한 지도).
+- 지도 기본값은 `~/robot_ws/src/maps/real/my_real_map.yaml`입니다 (H 단계에서 저장한 지도).
 
 **[PC] — RViz에서 목표 지점 클릭** (새 터미널에서 `source` 후)
 ```bash
@@ -674,7 +758,723 @@ ros2 topic info /cmd_vel_out --verbose
 
 ---
 
-## 13. 하드웨어 스펙 & 파라미터
+## 13. J. 실물 — Arduino Serial → STM32 + CANopen 마이그레이션
+
+> **이 단계는 A~I가 모두 동작하는 상태에서 시작합니다.** 상위 스택(IMU·EKF·라이다·SLAM·Nav2·조이스틱)은
+> 그대로 두고, **하부 구동 계층만** Arduino 시리얼에서 STM32 CAN(CANopen CiA 402)으로 교체합니다.
+> `twist_mux → /cmd_vel_out`과 `/odom → EKF` 인터페이스가 동일하게 유지되므로 상위 스택은 수정이 없습니다.
+
+### J-0. 왜 CAN인가
+
+| | Arduino Serial | STM32 + CANopen |
+|---|---|---|
+| 물리 계층 | USB 시리얼 (1:1) | CAN 버스 (멀티드롭, 최대 127노드) |
+| 프로토콜 | 자체 텍스트 (`"v 0.1 0.1\n"`) | **CiA 402 표준** (산업용 모터 드라이브 프로파일) |
+| 노이즈 내성 | 낮음 | 차동 신호로 높음 |
+| 확장성 | 장치마다 USB 포트 필요 | 버스에 노드 추가만 |
+| 진단 | 없음 | NMT 하트비트, EMCY, SDO abort 코드 |
+
+축을 늘릴 때(예: 3축 매니퓰레이터) 배선이 늘지 않고, 표준 프로파일이라 상용 드라이브와도 호환됩니다.
+
+### J-1. 하드웨어 구성 변경
+
+```
+[변경 전]  Pi ──USB Serial── Arduino Mega ── MDD10A ── 모터 ×2
+[변경 후]  Pi ──USB-CAN(gs_usb)── CAN Bus ── STM32 NUCLEO-F446RE ── MDD10A ── 모터 ×2
+```
+
+**추가 부품**
+- STM32 NUCLEO-F446RE
+- USB-CAN 어댑터 (candleLight, `gs_usb` 드라이버)
+- CAN 트랜시버 (TJA1050 등) ×1 (STM32 측)
+- 종단 저항 120Ω ×2 (버스 양 끝)
+
+**배선 시 필수 확인**
+- CAN_H ↔ CAN_L 저항이 **60Ω**(120Ω 두 개 병렬)일 것
+- **모든 장치의 GND 공유** — CAN은 차동 신호지만 공통 기준점(common mode reference)이 필요합니다
+- 모터 단자에 0.22µF 세라믹 커패시터 (PWM 노이즈의 전도 결합 차단)
+
+> **GND는 브레드보드 점퍼로 하지 마세요.** 접촉 저항이 조금만 생겨도 bus-off가 폭증합니다.
+> 실제로 이 프로젝트에서 GND 접촉 불량 하나로 `bus-off` 카운터가 10만 회를 넘긴 적이 있습니다 (트러블슈팅 참고).
+
+### J-2. CAN 인터페이스 설정
+
+```bash
+# [Pi] 인터페이스 확인
+ip link show can0
+
+# 500kbps로 up, bus-off 자동 복구 100ms
+sudo ip link set can0 down
+sudo ip link set can0 up type can bitrate 500000 restart-ms 100
+
+# 확인
+ip -details link show can0        # state UP, restart-ms 100
+candump can0                      # 하트비트 701 수신 확인
+```
+
+> **`restart-ms 100`은 선택이 아니라 필수입니다.** 기본값 0이면 bus-off에 한 번 빠졌을 때
+> 수동으로 down/up 하기 전까지 영구 정지합니다. 주행 중 진동으로 접촉이 흔들리면 그대로 제어 불능이 됩니다.
+> down/up 할 때마다 초기화되므로 매번 다시 지정해야 합니다.
+
+**권한 설정 (sudo 없이 실행)**
+
+CAN raw 소켓은 `CAP_NET_RAW`가 필요합니다. `netdev` 그룹만으로는 부족하므로 실행 파일에 capability를 부여합니다.
+
+```bash
+sudo setcap cap_net_raw,cap_net_admin=eip /opt/ros/humble/lib/canopen_core/device_container_node
+sudo setcap cap_net_raw,cap_net_admin=eip /opt/ros/humble/lib/controller_manager/ros2_control_node
+
+# 확인
+getcap /opt/ros/humble/lib/controller_manager/ros2_control_node
+```
+
+> `ros2_control_node`에도 반드시 부여해야 합니다. ros2_control을 붙이면 CAN 소켓을 여는 주체가
+> `device_container_node`가 아니라 `ros2_control_node`로 바뀌기 때문입니다.
+
+### J-3. STM32 펌웨어 (CANopenNode + CiA 402)
+
+**베이스**: [CANopenNode](https://github.com/CANopenNode/CANopenNode) + [CANopenNode_STM32](https://github.com/CANopenNode/CanOpenSTM32)
+
+**MotorAxis 구조체로 축 추상화** — 좌우(그리고 향후 3축 매니퓰레이터)를 동일 로직으로 처리합니다.
+
+```c
+typedef struct {
+    TIM_HandleTypeDef* enc_tim;      // 엔코더 타이머 (TIM3 / TIM4)
+    TIM_HandleTypeDef* pwm_tim;      // PWM 타이머 (TIM1)
+    uint32_t pwm_channel;            // CHANNEL_1 / CHANNEL_2
+    GPIO_TypeDef* dir_port;
+    uint16_t dir_pin;
+    int8_t enc_sign;                 // 오른쪽 -1, 왼쪽 +1
+    // OD 포인터 (축1: 0x60xx, 축2: 0x68xx)
+    uint16_t* od_controlword;
+    uint16_t* od_statusword;
+    int8_t*   od_mode;
+    int8_t*   od_mode_display;
+    int32_t*  od_target;
+    int32_t*  od_actual;
+    // PID 상태
+    float integral, prev_error, vel_filtered;
+} MotorAxis;
+```
+
+**축별 OD 매핑** (CiA 402 다축 규칙: 축 N은 `+0x800 × (N-1)`)
+
+| 객체 | 축1 (오른쪽) | 축2 (왼쪽) |
+|---|---|---|
+| Controlword | `0x6040` | `0x6840` |
+| Statusword | `0x6041` | `0x6841` |
+| Modes of Operation | `0x6060` | `0x6860` |
+| Mode Display | `0x6061` | `0x6861` |
+| Velocity Actual | `0x606C` | `0x686C` |
+| Target Velocity | `0x60FF` | `0x68FF` |
+| Supported drive modes | `0x6502` | `0x6D02` |
+
+**CiA 402 상태머신** (방식 A — 최소 구현)
+
+```
+Switch On Disabled (SW 0x0040)
+   ↓ CW 0x0006 (Shutdown)
+Ready to Switch On (SW 0x0021)
+   ↓ CW 0x0007 (Switch On)
+Switched On (SW 0x0023)
+   ↓ CW 0x000F (Enable Operation)
+Operation Enabled (SW 0x0027)   ← 이 상태에서만 모터에 전류가 걸립니다
+```
+
+Statusword 비교 시 **하위 비트만 마스킹**(`& 0x006F`)해야 합니다. bit10(Target Reached) 등 상위 비트는
+상태와 무관하게 변하므로, 마스킹 없이 `== 0x0027`로 비교하면 오작동합니다.
+
+**제어 루프** (20ms / 50Hz, Arduino 펌웨어에서 그대로 이식)
+
+```
+목표속도(0x60FF) → [P I D + 피드포워드] → PWM → 모터
+엔코더 → [저역통과 필터] → 실제속도(0x606C)
+```
+
+- `Kp=150, Ki=300, Kd=0`, 피드포워드 `PWM = 222.7 × v + 3.4`
+- 적분 windup 방지: `int_limit = INTEGRAL_MAX / KI`로 클램핑
+- OD는 정수형이므로 **×1000 스케일** (0.1 m/s ↔ 100)
+
+**PWM 타이머 설정 (중요)**
+
+```c
+htim1.Init.Prescaler = 87;      // 84MHz / 88 / 256 ≈ 3.7kHz
+htim1.Init.Period    = 255;     // PWM 분해능 0~255 (Arduino analogWrite와 동일)
+```
+
+> **MDD10A 권장 상한이 20kHz입니다.** Prescaler=15이면 20.5kHz로 스펙을 살짝 넘겨,
+> **저 duty(저속)에서만** 모터가 끊기는 현상이 발생합니다. 여유 있게 3.7kHz로 설정하세요 (트러블슈팅 참고).
+
+**부팅 시 자동 OP 전환 제거**
+
+`CO_app_STM32.c`에서 `CO_NMT_STARTUP_TO_OPERATIONAL`을 제거해, 슬레이브가 스스로 Operational로 가지 않고
+**마스터의 NMT Start 명령을 기다리도록** 합니다. 마스터가 PDO 매핑을 설정한 뒤 전환시키는 것이 정상 순서입니다.
+
+### J-4. EDS / Object Dictionary 작성
+
+**도구**: [CANopenEditor](https://github.com/CANopenNode/CANopenEditor) (v4.2.3)
+
+`.xpd` 프로젝트를 원본으로 두고, 여기서 두 가지를 export 합니다.
+
+```
+CANopenEditor (.xpd)
+   ├── Export EDS         → Pi 측 (dcfgen 입력)
+   └── Export CANopenNode → STM32 측 (OD.c / OD.h)
+```
+
+**필수 객체 체크리스트**
+
+| 인덱스 | 이름 | AccessType | PDO Mapping | 비고 |
+|---|---|---|---|---|
+| `0x6040/0x6840` | Controlword | **`rww`** | RPDO | `rw`면 lely 검증 실패 |
+| `0x6041/0x6841` | Statusword | `ro` | **TPDO(`tr`)** | |
+| `0x6060/0x6860` | Modes of Operation | **`rww`** | RPDO | |
+| `0x6061/0x6861` | Mode Display | `ro` | **TPDO(`tr`)** | |
+| `0x606C/0x686C` | Velocity Actual | `ro` | **TPDO(`tr`)** | |
+| `0x60FF/0x68FF` | Target Velocity | **`rww`** | RPDO | |
+| `0x6064/0x6864` | Position Actual | `ro` | — | 드라이버가 존재를 요구 |
+| **`0x6502/0x6D02`** | **Supported drive modes** | `ro` | No | **누락 시 SIGSEGV** |
+
+**`0x6502`는 반드시 넣으세요.** `UNSIGNED32`, DefaultValue `0x00000004`(bit2 = pv 모드).
+누락하면 드라이버가 부팅 중 SDO abort `0x06020000`을 받고 **세그멘테이션 폴트로 죽습니다.**
+
+> **실제로 구현한 모드만 켜야 합니다.** EDS에 `0x607A`(Target Position)가 있다고 해서 pp 모드를 켜면
+> (`0x05`), 드라이버가 위치 모드로 전환을 시도했다가 조용히 실패합니다. 펌웨어에 위치 제어 루프가
+> 없으면 사용하지 마세요.
+
+**EDS 후처리 (Pi 측, 매번 export 후 반복 필요)**
+
+CANopenEditor는 `rww`를 생성하지 못하고 `$NODEID` 표현식을 그대로 남기므로 직접 수정합니다.
+
+```bash
+cd ~/robot_ws/src/my_robot_canopen/config/my_robot
+cp my_robot.eds my_robot.eds.bak
+
+# 1) RPDO 대상 객체의 AccessType을 rww로
+python3 - << 'EOF'
+import re
+path = "my_robot.eds"
+content = open(path, encoding='utf-8', errors='ignore').read()
+for idx in ['6040', '6060', '60FF', '6840', '6860', '68FF']:
+    content = re.sub(r'(\[' + idx + r'\][^\[]*?AccessType=)rw(\s)', r'\1rww\2',
+                     content, flags=re.IGNORECASE)
+open(path, 'w', encoding='utf-8').write(content)
+EOF
+
+# 2) $NODEID 표현식을 고정값으로
+sed -i 's/DefaultValue=0x80+\$NODEID/DefaultValue=0x81/' my_robot.eds
+sed -i 's/DefaultValue=0x600+\$NODEID/DefaultValue=0x601/' my_robot.eds
+sed -i 's/DefaultValue=0x580+\$NODEID/DefaultValue=0x581/' my_robot.eds
+sed -i '/^NG_Slave/d' my_robot.eds
+
+# 3) 확인
+for i in 6040 60FF 6840 68FF; do grep -A6 "^\[$i\]" my_robot.eds | grep AccessType; done
+grep -n 'NODEID' my_robot.eds     # 아무것도 안 나와야 정상
+```
+
+**AccessType 규칙**
+
+| 값 | 의미 |
+|---|---|
+| `rw` | 일반 읽기/쓰기 (PDO 매핑 불가) |
+| **`rww`** | **RPDO 방향** (마스터 → 슬레이브) |
+| `rwr` | TPDO 방향 (슬레이브 → 마스터) |
+| `ro` | 읽기 전용 |
+
+### J-5. bus.yml 작성 및 DCF 생성
+
+`~/robot_ws/src/my_robot_canopen/config/my_robot/bus.yml`:
+
+```yaml
+options:
+  dcf_path: "/home/lch/robot_ws/install/my_robot_canopen/share/my_robot_canopen/config/my_robot"
+
+master:
+  node_id: 2
+  driver: "ros2_canopen::MasterDriver"
+  package: "canopen_master_driver"
+  baudrate: 500
+  sync_period: 20000              # 마이크로초 = 20ms
+
+motor:
+  node_id: 1
+  boot_timeout_ms: 5000           # 기본값(~20ms)은 너무 짧아 반드시 늘려야 함
+  dcf: "my_robot.eds"
+  driver: "ros2_canopen::DualAxisDriver"     # 커스텀 드라이버 (J-6)
+  package: "my_dual_axis_driver"
+  period: 20
+  scale_pos_to_dev: 1000.0
+  scale_pos_from_dev: 0.001
+  scale_vel_to_dev: 1000.0
+  scale_vel_from_dev: 0.001
+  rpdo:
+    1: { enabled: true, cob_id: "auto",
+         mapping: [{index: 0x6040, sub_index: 0}, {index: 0x6060, sub_index: 0}] }
+    2: { enabled: true, cob_id: "auto",
+         mapping: [{index: 0x60FF, sub_index: 0}] }
+    3: { enabled: true, cob_id: "auto",
+         mapping: [{index: 0x6840, sub_index: 0}, {index: 0x6860, sub_index: 0}] }
+    4: { enabled: true, cob_id: "auto",
+         mapping: [{index: 0x68FF, sub_index: 0}] }
+  tpdo:
+    1: { enabled: true, cob_id: "auto", transmission: 0x01,
+         mapping: [{index: 0x6041, sub_index: 0}, {index: 0x6061, sub_index: 0}] }
+    2: { enabled: true, cob_id: "auto", transmission: 0x01,
+         mapping: [{index: 0x606C, sub_index: 0}] }
+    3: { enabled: true, cob_id: "auto", transmission: 0x01,
+         mapping: [{index: 0x6841, sub_index: 0}, {index: 0x6861, sub_index: 0}] }
+    4: { enabled: true, cob_id: "auto", transmission: 0x01,
+         mapping: [{index: 0x686C, sub_index: 0}] }
+```
+
+**DCF 생성**
+
+```bash
+cd ~/robot_ws/src/my_robot_canopen/config/my_robot
+dcfgen -d . -r -v bus.yml        # -r 플래그 필수 (원격 PDO 매핑 생성)
+```
+
+> **`-r` 없이 생성하면** 마스터가 슬레이브의 PDO 매핑을 설정하지 못해 통신이 성립하지 않습니다.
+
+**COB-ID 자동 할당 결과** (`cob_id: "auto"` → 표준 Pre-defined Connection Set)
+
+| PDO | 공식 | 노드1 | 내용 |
+|---|---|---|---|
+| RPDO1 | `0x200 + ID` | `0x201` | 축1 Controlword + Mode |
+| RPDO2 | `0x300 + ID` | `0x301` | 축1 Target Velocity |
+| RPDO3 | `0x400 + ID` | `0x401` | 축2 Controlword + Mode |
+| RPDO4 | `0x500 + ID` | `0x501` | 축2 Target Velocity |
+| TPDO1 | `0x180 + ID` | `0x181` | 축1 Statusword + Mode Display |
+| TPDO2 | `0x280 + ID` | `0x281` | 축1 Velocity Actual |
+| TPDO3 | `0x380 + ID` | `0x381` | 축2 Statusword + Mode Display |
+| TPDO4 | `0x480 + ID` | `0x481` | 축2 Velocity Actual |
+
+`transmission: 0x01`은 "SYNC마다 전송"입니다. TPDO에만 지정하며, RPDO는 **값이 바뀔 때만**(이벤트 기반)
+전송되므로 candump에서 명령 시점에만 나타나는 것이 정상입니다.
+
+### J-6. 커스텀 다축 드라이버 (핵심)
+
+**문제**: `ros2_canopen` Humble 0.2.13의 `Cia402Driver`는 **1축만** 지원합니다.
+
+```cpp
+// canopen_402_driver/motor.hpp
+typedef ModeForwardHelper<MotorBase::Profiled_Velocity, int32_t, 0x60FF, 0, 0> ProfiledVelocityMode;
+//                                                              ↑ 컴파일 타임 상수
+```
+
+`0x60FF`가 **템플릿 인자**라 런타임에 `0x68FF`(축2)로 바꿀 수 없습니다. 인스턴스를 두 개 만들어도
+둘 다 축1만 제어합니다. master 브랜치에는 채널 기능이 있으나 Humble에는 백포트되지 않았습니다.
+
+**해결**: `LelyDriverBridge`의 API는 인덱스를 **런타임 인자**로 받습니다.
+
+```cpp
+// canopen_base_driver/lely_driver_bridge.hpp
+template <typename T>
+void universal_set_value(uint16_t index, uint8_t subindex, T value);
+//                       ↑ 런타임 값 — 축 제약 없음
+```
+
+이 계층에서 직접 갈라져 나오는 드라이버를 작성합니다.
+
+**클래스 계층** (`ros2_canopen`은 "두뇌"와 "껍데기" 2트랙 구조)
+
+```
+[두뇌 — 실제 로직, 4단 상속]
+  NodeCanopenDriver
+    └ NodeCanopenBaseDriver        ← lely_driver_ 소유 (protected)
+        └ NodeCanopenProxyDriver   ← SDO/NMT 서비스
+            ├ NodeCanopen402Driver         (기존, 축1 고정)
+            └ NodeCanopenDualAxisDriver    (신규, 축 자유)
+
+[껍데기 — ROS2 컴포넌트, 서로 형제]
+  CanopenDriver
+    ├ BaseDriver / ProxyDriver / Cia402Driver
+    └ DualAxisDriver               (신규)
+```
+
+`Proxy`를 상속하면 `sdo_read`/`sdo_write`/`nmt_start_node` 서비스를 그대로 얻어 디버깅이 쉬워집니다.
+`lely_driver_`는 `protected`이므로 손자 클래스에서도 접근 가능합니다.
+
+**축 인덱스 런타임 계산** — 이 구조가 다축을 가능하게 하는 핵심입니다.
+
+```cpp
+namespace cia402_offset {
+constexpr uint16_t CONTROLWORD  = 0x040;   // 전체 인덱스가 아닌 "오프셋"만 저장
+constexpr uint16_t VEL_TARGET   = 0x0FF;
+}
+
+struct AxisContext {
+    uint16_t base{0x6000};                 // 축1: 0x6000, 축2: 0x6800
+    uint16_t idx(uint16_t offset) const { return base + offset; }
+};
+
+// 사용
+axes_[0].idx(VEL_TARGET)  →  0x60FF
+axes_[1].idx(VEL_TARGET)  →  0x68FF
+```
+
+**목표속도 전달** (벽을 뚫는 지점)
+
+```cpp
+bool set_axis_target(size_t axis, double velocity)
+{
+    auto & ax = axes_[axis];
+    const auto raw = static_cast<int32_t>(velocity * scale_vel_to_dev_);
+    this->lely_driver_->template universal_set_value<int32_t>(
+        ax.idx(cia402_offset::VEL_TARGET), 0, raw);   // 0x60FF 또는 0x68FF
+    return true;
+}
+```
+
+> **`->template`은 오타가 아닙니다.** 템플릿 클래스 안에서 의존 이름의 템플릿 멤버 함수를 호출할 때
+> 필요한 C++ 문법입니다. 같은 이유로 부모 멤버 접근에 `this->`가 계속 붙습니다.
+
+**파일 구성**
+
+```
+my_dual_axis_driver/
+├── package.xml                                        # canopen_proxy_driver, hardware_interface, pluginlib
+├── CMakeLists.txt                                     # SHARED 라이브러리 + 컴포넌트/플러그인 등록
+├── dual_axis_hardware.xml                             # ros2_control 플러그인 설명
+├── include/my_dual_axis_driver/
+│   ├── dual_axis_driver.hpp                           # 껍데기 (CanopenDriver 상속)
+│   ├── dual_axis_system.hpp                           # SystemInterface (J-7)
+│   └── node_interfaces/
+│       ├── node_canopen_dual_axis_driver.hpp          # 두뇌 선언
+│       └── node_canopen_dual_axis_driver_impl.hpp     # 두뇌 구현 (템플릿이라 헤더에)
+└── src/
+    ├── node_canopen_dual_axis_driver.cpp              # 명시적 인스턴스화
+    ├── dual_axis_driver.cpp                           # 껍데기 + RCLCPP_COMPONENTS_REGISTER_NODE
+    └── dual_axis_system.cpp                           # SystemInterface + PLUGINLIB_EXPORT_CLASS
+```
+
+> **템플릿 구현이 `_impl.hpp`에 있는 이유**: 템플릿은 타입이 정해져야 코드가 생성되므로, 사용하는 쪽에서
+> 정의를 볼 수 있어야 합니다. `.cpp`에 두면 `undefined symbol` 링크 에러가 납니다.
+> `dual_axis_driver.cpp`에서도 `_impl.hpp`를 include 해야 생성자가 인스턴스화됩니다.
+
+**드라이버 단독 검증** (ros2_control 없이)
+
+```bash
+ros2 launch my_robot_canopen my_robot_canopen.launch.py
+
+# 바퀴를 공중에 띄운 상태에서
+ros2 service call /axis0/init std_srvs/srv/Trigger
+ros2 service call /axis0/velocity_mode std_srvs/srv/Trigger
+ros2 service call /axis0/target canopen_interfaces/srv/COTargetDouble "{target: 0.1}"
+
+ros2 service call /axis1/init std_srvs/srv/Trigger
+ros2 service call /axis1/velocity_mode std_srvs/srv/Trigger
+ros2 service call /axis1/target canopen_interfaces/srv/COTargetDouble "{target: 0.1}"
+```
+
+```bash
+# candump로 확인 — 501에 목표속도가 나타나면 다축 제어 성공
+candump -t a can0 | grep -E "201|301|401|501"
+# 401 [3] 06 00 00 → 07 00 00 → 0F 00 00 → 0F 00 03   (축2 상태머신)
+# 501 [4] 64 00 00 00                                  (축2 목표속도 100 = 0.1 m/s)
+```
+
+### J-7. ros2_control 통합 (SystemInterface)
+
+`diff_drive_controller`를 쓰려면 `hardware_interface::SystemInterface` 구현이 필요합니다.
+`canopen_ros2_control`의 `RobotSystem`을 참고하되, **한 노드에 축이 둘**이라는 점이 다릅니다.
+
+| | RobotSystem (기존) | DualAxisSystem (신규) |
+|---|---|---|
+| 조인트 2개 | 노드 2개 (`node_id`로 구분) | **노드 1개 + `axis`로 구분** |
+| 드라이버 | 조인트마다 별개 인스턴스 | **두 조인트가 같은 인스턴스 공유** |
+
+**구조**
+
+```cpp
+struct AxisJointData {
+    uint8_t node_id;
+    size_t axis;                                            // 0 = 0x6000, 1 = 0x6800
+    std::string joint_name;
+    double wheel_radius{0.0325};                            // rad/s ↔ m/s 변환용
+    std::shared_ptr<ros2_canopen::DualAxisDriver> driver;   // 두 조인트가 공유
+
+    void read_state()   { actual_velocity = driver->get_axis_speed(axis) / wheel_radius; }
+    void write_target() { driver->set_axis_target(axis, target_velocity * wheel_radius); }
+};
+```
+
+> **단위 변환이 핵심입니다.** `diff_drive_controller`는 바퀴 조인트에 **rad/s**를 명령하고,
+> 우리 드라이버는 **m/s**를 받습니다. 변환을 빠뜨리면 `0.1 / 0.0325 ≈ 3.08`이 m/s로 해석되어
+> **약 31배 빠르게** 회전합니다. 반드시 바퀴를 띄운 상태에서 첫 테스트를 하세요.
+
+**DeviceContainer를 내부에서 소유**
+
+```cpp
+hardware_interface::CallbackReturn DualAxisSystem::on_configure(...)
+{
+    executor_ = std::make_shared<rclcpp::executors::MultiThreadedExecutor>();
+    device_container_ = std::make_shared<ros2_canopen::DeviceContainer>(executor_);
+    spin_thread_ = std::make_unique<std::thread>(&DualAxisSystem::spin, this);
+    init_thread_ = std::make_unique<std::thread>(&DualAxisSystem::initDeviceContainer, this);
+    init_thread_->join();
+
+    auto drivers = device_container_->get_registered_drivers();
+    auto casted = std::dynamic_pointer_cast<ros2_canopen::DualAxisDriver>(
+                      drivers.find(data.node_id)->second);
+    data.driver = casted;
+    ...
+}
+```
+
+**`device_container_node`를 따로 띄우지 않습니다.** `controller_manager`가 하드웨어 플러그인을 로드하면서
+그 프로세스 안에서 CANopen 스택이 함께 뜹니다.
+
+**`on_activate()`에서 자동 기동**
+
+```cpp
+data.driver->init_axis(data.axis);            // CiA402: 06 → 07 → 0F
+data.driver->set_axis_mode(data.axis, 3);     // Profile Velocity
+data.target_velocity = 0.0;                   // NaN 해제
+```
+
+`diff_drive_controller`는 velocity 명령 인터페이스만 사용하므로 init을 트리거할 방법이 없습니다.
+컨트롤러 활성화 시점에 자동으로 모터를 준비시킵니다.
+
+**URDF `<ros2_control>` 태그** (`urdf/my_robot_ros2_control.xacro`)
+
+```xml
+<ros2_control name="MyRobotCanopenSystem" type="system">
+  <hardware>
+    <plugin>my_dual_axis_driver/DualAxisSystem</plugin>
+    <param name="bus_config">${bus_config}</param>
+    <param name="master_config">${master_config}</param>
+    <param name="can_interface_name">can0</param>
+  </hardware>
+
+  <joint name="wheel_right_joint">
+    <param name="node_id">1</param>
+    <param name="axis">0</param>              <!-- 0x6000 -->
+    <param name="wheel_radius">0.0325</param>
+    <command_interface name="velocity"/>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+  </joint>
+
+  <joint name="wheel_left_joint">
+    <param name="node_id">1</param>
+    <param name="axis">1</param>              <!-- 0x6800 -->
+    <param name="wheel_radius">0.0325</param>
+    <command_interface name="velocity"/>
+    <state_interface name="position"/>
+    <state_interface name="velocity"/>
+  </joint>
+</ros2_control>
+```
+
+메인 URDF에는 **조건부로** include 합니다. 시뮬레이션에서는 Gazebo 플러그인이 바퀴를 구동하므로
+`ros2_control` 태그가 있으면 충돌합니다.
+
+```xml
+<xacro:arg name="use_ros2_control" default="false"/>
+<xacro:if value="$(arg use_ros2_control)">
+  <xacro:include filename="$(find my_robot)/urdf/my_robot_ros2_control.xacro"/>
+  <xacro:my_robot_ros2_control bus_config="$(arg bus_config)"
+                               master_config="$(arg master_config)"
+                               can_interface="can0"/>
+</xacro:if>
+```
+
+**컨트롤러 설정** (`config/my_robot_controllers.yaml`)
+
+```yaml
+controller_manager:
+  ros__parameters:
+    update_rate: 50                # STM32 제어주기 20ms 와 일치
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+    diff_drive_controller:
+      type: diff_drive_controller/DiffDriveController
+
+diff_drive_controller:
+  ros__parameters:
+    left_wheel_names:  ["wheel_left_joint"]
+    right_wheel_names: ["wheel_right_joint"]
+    wheel_separation: 0.185
+    wheel_radius: 0.0325
+    publish_rate: 50.0
+    odom_frame_id: odom
+    base_frame_id: base_footprint
+    open_loop: false               # 엔코더 피드백으로 오도메트리 계산
+    position_feedback: false       # position 이 아직 0 이므로 속도만 사용
+    enable_odom_tf: false          # EKF 가 TF 를 발행하므로 반드시 false
+    cmd_vel_timeout: 1.0
+    linear:
+      x: { has_velocity_limits: true, max_velocity: 0.5, min_velocity: -0.5,
+           has_acceleration_limits: true, max_acceleration: 1.0, min_acceleration: -1.0 }
+    angular:
+      z: { has_velocity_limits: true, max_velocity: 2.0, min_velocity: -2.0,
+           has_acceleration_limits: true, max_acceleration: 3.0, min_acceleration: -3.0 }
+```
+
+> **`enable_odom_tf: false`가 핵심입니다.** 기존 `base_controller.py`의 `publish_tf:=false`와 같은 역할로,
+> `odom → base_footprint` TF는 IMU를 융합하는 EKF가 발행해야 정확합니다. 둘 다 켜면 TF가 충돌합니다.
+
+### J-8. 기존 스택과 연결
+
+**인터페이스를 동일하게 유지**하는 것이 목표입니다. 리매핑으로 해결합니다.
+
+```
+[변경 전]  twist_mux → /cmd_vel_out → base_controller → 시리얼 → Arduino
+                                           ↓ /odom
+                                          EKF → TF
+
+[변경 후]  twist_mux → /cmd_vel_out → diff_drive_controller → CANopen → STM32
+                                           ↓ /odom
+                                          EKF → TF
+```
+
+`robot_control.launch.py`의 `ros2_control_node`에 리매핑을 추가합니다.
+
+```python
+control_node = Node(
+    package='controller_manager',
+    executable='ros2_control_node',
+    parameters=[robot_description, controllers_file],
+    remappings=[
+        ('/diff_drive_controller/cmd_vel_unstamped', '/cmd_vel_out'),
+        ('/diff_drive_controller/odom', '/odom'),
+    ],
+    output='screen',
+)
+```
+
+**중복 노드 제거 (중요)**
+
+`bringup_real.launch.py`가 `robot_state.launch.py`와 `robot_control.launch.py`를 모두 include 하므로
+`robot_state_publisher`가 두 개 뜨지 않도록 인자로 제어합니다.
+
+```python
+IncludeLaunchDescription(
+    PythonLaunchDescriptionSource(
+        os.path.join(pkg, 'launch', 'robot_control.launch.py')),
+    launch_arguments={'use_robot_state_publisher': 'false'}.items(),
+),
+```
+
+`robot_state.launch.py`의 `joint_state_publisher`도 꺼야 합니다. 실물에서는 `joint_state_broadcaster`가
+**실제 엔코더 값**으로 `/joint_states`를 발행하므로, URDF만 보고 0을 발행하는 `joint_state_publisher`와
+충돌합니다.
+
+| 노드 | 값의 출처 | Arduino 구성 | STM32 구성 |
+|---|---|---|---|
+| `joint_state_publisher` | URDF만 보고 0 고정 | **사용** | 없음 |
+| `joint_state_broadcaster` | 실제 하드웨어 state_interface | 없음 | **사용** |
+| `robot_state_publisher` | `/joint_states` + URDF → TF 계산 | 사용 (1개) | 사용 (1개) |
+
+**해결 — bringup 파일을 구성별로 분리**
+
+조건부 인자를 쓰는 대신, 각 bringup이 **자기 구성에 필요한 노드를 온전히 포함**하도록 나눕니다.
+이러면 인자가 필요 없고, 두 경로가 서로 간섭하지 않으며, 각각 단독 실행도 자연스럽습니다.
+
+```
+bringup_real_arduino.launch.py          (Arduino Serial)
+  ├ robot_state.launch.py               # robot_state_publisher + joint_state_publisher
+  ├ base_controller.py (publish_tf:=false, cmd_vel → /cmd_vel_out)
+  ├ imu_node.py / ekf_node / ydlidar_node / joy_teleop
+  └ → 원본 그대로, 수정 불필요
+
+bringup_real_stm32.launch.py            (STM32 + CANopen)
+  ├ robot_control.launch.py             # robot_state_publisher + joint_state_broadcaster
+  │                                     #   + diff_drive_controller (+ ros2_control_node)
+  ├ imu_node.py / ekf_node / ydlidar_node / joy_teleop
+  └ → robot_state.launch.py 를 include 하지 않음 (중복 없음)
+```
+
+`mapping.launch.py`·`navigation.launch.py`는 `base:=` 인자로 둘 중 하나를 선택합니다.
+
+```python
+base = LaunchConfiguration('base')
+use_stm32   = PythonExpression(["'", base, "' == 'stm32'"])
+use_arduino = PythonExpression(["'", base, "' == 'arduino'"])
+
+return LaunchDescription([
+    DeclareLaunchArgument('base', default_value='stm32'),
+
+    IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(pkg, 'launch', 'bringup_real_stm32.launch.py')),
+        condition=IfCondition(use_stm32),
+    ),
+    IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(pkg, 'launch', 'bringup_real_arduino.launch.py')),
+        condition=IfCondition(use_arduino),
+    ),
+    # ... SLAM 또는 Nav2 ...
+])
+```
+
+```bash
+ros2 launch my_robot mapping.launch.py                 # STM32 (기본)
+ros2 launch my_robot mapping.launch.py base:=arduino   # Arduino
+```
+
+> `robot_control.launch.py`가 `robot_state_publisher`를 직접 포함하므로 단독 실행 시에도 TF가 정상 발행됩니다.
+> 이때 URDF는 `use_ros2_control:=true`로 처리된 것이지만, `robot_state_publisher`는 링크·조인트만 읽고
+> `<ros2_control>` 태그는 무시하므로 문제되지 않습니다.
+
+### J-9. 검증
+
+**실행**
+
+```bash
+# [Pi] 한 줄로 (하드웨어 + IMU + EKF + 조이스틱 + SLAM)
+ros2 launch my_robot mapping.launch.py
+```
+
+**단계별 확인**
+
+```bash
+# 1) 컨트롤러 활성화
+ros2 control list_controllers
+#   joint_state_broadcaster  active
+#   diff_drive_controller    active
+
+# 2) 노드 중복 없음
+ros2 node list | grep robot_state              # 1개만
+ros2 topic info /joint_states --verbose        # Publisher: joint_state_broadcaster
+
+# 3) TF 발행 주체 (EKF 하나여야 함)
+ros2 run tf2_tools view_frames
+#   odom → base_footprint,  Average rate ≈ 30Hz (EKF frequency)
+#   50Hz 로 나오면 diff_drive_controller 가 아직 TF 를 내고 있는 것
+```
+
+**주행 검증** (바퀴를 공중에 띄우고)
+
+```bash
+# 직진 0.1 m/s
+ros2 topic pub --rate 10 /cmd_vel_out geometry_msgs/msg/Twist \
+  "{linear: {x: 0.1}, angular: {z: 0.0}}"
+# candump: 301, 501 모두 64 00 00 00 (=100)
+
+# 제자리 회전 1.0 rad/s
+ros2 topic pub --rate 10 /cmd_vel_out geometry_msgs/msg/Twist \
+  "{linear: {x: 0.0}, angular: {z: 1.0}}"
+# candump: 301 → 5C 00 00 00 (+92),  501 → A4 FF FF FF (-92)
+# 계산: ±(1.0 × 0.185)/2 = ±0.0925 m/s → ±92
+```
+
+**오도메트리 정합**
+
+```bash
+ros2 topic echo /odom --once
+# 회전 명령 중 twist.twist.angular.z ≈ 0.976  (명령 1.0 대비 2.4% 오차)
+```
+
+회전 시 바퀴 속도가 `±92`로 정확히 나오면 `wheel_separation = 0.185`가 검증된 것입니다.
+
+**최종 확인**: 조이스틱으로 실제 주행 → `mapping.launch.py`로 지도 그리기 → 기존과 동일하게 동작
+
+---
+
+## 14. 하드웨어 스펙 & 파라미터
 
 | 항목 | 값 |
 |---|---|
@@ -689,7 +1489,7 @@ ros2 topic info /cmd_vel_out --verbose
 | 엔코더 핀 (Arduino) | `ENC_L_A=18, ENC_L_B=19, ENC_R_A=2, ENC_R_B=3` |
 | PID | `Kp=150, Ki=300, Kd=0` |
 | 피드포워드 | `PWM = 222.7 × speed + 3.4` |
-| 통신 | `ROS_DOMAIN_ID=30`, `RMW_IMPLEMENTATION=rmw_fastrtps_cpp` |
+| 통신 | `ROS_DOMAIN_ID=30`, `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` (무선 지터 개선, Pi·PC 양쪽 동일 설정 필요) |
 | 조이스틱 | 8BitDo Ultimate 2 Wireless, VID:PID `2dc8:310b` |
 | 조이스틱 속도 스케일 | linear 0.22 m/s, angular 1.0 rad/s |
 | IMU | MPU6050 (I2C 0x68), DLPF 44Hz, 자이로 Z만 EKF 융합 |
@@ -698,11 +1498,22 @@ ros2 topic info /cmd_vel_out --verbose
 | 360° 회전 오차 | 바퀴만 27.8° → 융합 1.4° (약 20배 개선) |
 | USB 포트 고정 | udev: YDLIDAR(10c4:ea60)→`/dev/ydlidar`, Arduino(1a86:7523)→`/dev/arduino` |
 | TF 트리 | `map → odom → base_footprint → base_link → …` |
+| **모터 제어기 (현행)** | **STM32 NUCLEO-F446RE, CANopenNode 슬레이브 (CiA 402)** |
+| **CAN 어댑터** | **candleLight USB-CAN (`gs_usb`), 500 kbps** |
+| **CAN 노드 ID** | **마스터(Pi) = 2, 슬레이브(STM32) = 1** |
+| **CiA 402 축 매핑** | **축1(오른쪽) `0x6040~0x60FF` / 축2(왼쪽) `0x6840~0x68FF` (+0x800 오프셋)** |
+| **동작 모드** | **Profile Velocity (mode 3), `0x6502` = `0x04`** |
+| **SYNC / 제어 주기** | **20 ms (50 Hz) — 마스터 SYNC, STM32 PID, ros2_control update_rate 모두 일치** |
+| **PWM 타이머 (STM32)** | **TIM1, Prescaler 87, Period 255 → 약 3.7 kHz (MDD10A 20kHz 스펙 내)** |
+| **엔코더 타이머** | **TIM3(축1) / TIM4(축2), `TIM_ENCODERMODE_TI12` (4체배)** |
+| **OD 스케일** | **`scale_vel_to_dev: 1000.0` (0.1 m/s ↔ 정수 100)** |
+| **ros2_control** | **`my_dual_axis_driver/DualAxisSystem` + `diff_drive_controller`** |
+| **명령 배선 (현행)** | **`twist_mux` → `/cmd_vel_out` → `diff_drive_controller` → CANopen → STM32** |
 | 명령 배선 | `joy→/cmd_vel_joy`, `nav2→/cmd_vel_nav→velocity_smoother→/cmd_vel` → `twist_mux` → `/cmd_vel_out` → base_controller |
 
 ---
 
-## 14. 트러블슈팅
+## 15. 트러블슈팅
 
 **제어 · 통신**
 - **cmd_vel이 실물에서만 최대 0.815초 지연** → 원인은 시리얼이 아니라 무선 환경 RELIABLE QoS의 재전송 큐잉. `/odom` 주기(49.3Hz, 지터 1.6ms)로 시리얼 결백을 데이터로 먼저 확인.
@@ -733,6 +1544,63 @@ ros2 topic info /cmd_vel_out --verbose
 - **`/odom` Odometry 화살표가 RViz에 안 보임** → base_controller가 BEST_EFFORT로 발행하므로 RViz Reliability를 `Best Effort`로.
 - **AMCL 초기 위치 미반영** → `initial_pose_x`가 아니라 `initial_pose.x`(점 표기) 확인.
 - **(시뮬) 라이다가 로봇 뒤 빈 공간에 유령 물체 감지** → `base_link`의 collision 박스가 라이다 레이저 높이에 걸리거나, 로봇이 미세하게 기울어 뒤쪽 광선이 캐스터를 훑는 것. collision 높이를 낮추고, 라이다 `range_min`을 0.165로, 캐스터 마찰(`mu`)을 조정해 해결. `/scan`의 `ranges`에서 비정상적으로 짧은 값의 인덱스로 방향을 특정.
+
+**STM32 · CANopen (J단계)**
+
+- **드라이버 부팅 중 SIGSEGV로 프로세스 사망 (`exit code -11`)** → OD에 `0x6502`(Supported drive modes)가 없는 것. 로그 마지막에 `async_sdo_read: id=1 index=0x6502 ... object does not exist`와 abort `0x06020000`이 찍힙니다. CANopenEditor에서 `0x6502`(UNSIGNED32, ro, DefaultValue `0x04`) 추가 후 **STM32 재플래시**까지 해야 해결됩니다. Pi 측 EDS만 고치면 안 됩니다 — 마스터는 런타임에 슬레이브 OD를 직접 조회하기 때문입니다. 다축이면 `0x6D02`도 추가.
+- **`ros2 service call`이 응답 없이 멈춤** → 서비스 서버(드라이버 노드)가 처리 도중 크래시한 것. CLI는 오지 않을 응답을 기다립니다. launch 터미널의 `process has died`를 먼저 확인하세요.
+- **PDO 매핑 거부 (`0x06040041`)** → CANopenEditor에서 해당 객체의 Access PDO를 `tr`(TPDO 방향)로 설정하고 OD.c 재생성. RPDO 방향 객체는 EDS의 `AccessType`을 **`rww`**로 (CANopenEditor는 `rww`를 생성하지 못하므로 export 후 직접 수정).
+- **`Boot Timeout: The boot configure process timeout!`** → `boot_timeout_ms` 기본값이 ~20ms로 매우 짧습니다. `bus.yml`에 `boot_timeout_ms: 5000` 명시. 1차 실패 후 NMT 리셋으로 재시도해 성공하는 경우도 정상 동작이지만, 매번 5초를 소모하면 값을 더 늘리세요.
+- **마스터가 슬레이브 PDO 매핑을 설정하지 못함** → `dcfgen`에 **`-r` 플래그** 누락. `dcfgen -d . -r -v bus.yml`.
+- **`@BUS_CONFIG_PATH@`가 치환되지 않음** → `bus.yml`의 `dcf_path`를 install 공간의 실제 절대경로로 지정.
+- **CAN 소켓 열기 실패 (`Operation not permitted`)** → `netdev` 그룹만으로는 부족합니다. `sudo setcap cap_net_raw,cap_net_admin=eip <실행파일>`. **ros2_control을 쓰면 `ros2_control_node`에도** 부여해야 합니다(소켓을 여는 주체가 바뀜). setcap을 붙이면 `LD_LIBRARY_PATH`가 무시되므로, 라이브러리를 못 찾으면 `/etc/ld.so.conf.d/`에 경로를 등록하고 `ldconfig`.
+
+**CAN 물리 계층**
+
+- **통신이 간헐적으로 끊기고 USB-CAN LED가 점멸을 멈춤** → 대부분 **GND 접촉 불량**입니다. `ip -details -statistics link show can0`의 `error-warn`/`error-pass`/`bus-off` 카운터를 확인하세요. 정상이면 0에 가깝고, 접촉 불량이면 수만~수십만으로 폭증합니다. 브레드보드 GND는 신뢰하지 말고 납땜하거나 스크류 터미널을 쓰세요.
+- **리셋 버튼으로는 안 살아나는데 재플래시하면 살아남** → 펌웨어 문제가 아니라 **보드를 만지는 물리적 진동으로 접촉이 회복된 것**일 수 있습니다. 재플래시가 "고쳤다"고 단정하지 말고 카운터를 확인하세요.
+- **`bus-off` 누적 후 `ip link down/up`으로 복구되지 않음** → `gs_usb` 커널 드라이버나 어댑터 펌웨어가 비정상 상태에 갇힌 것. 복구 순서: ① launch 종료 → ② **STM32 USB 전원 분리**(버스를 조용하게) → ③ `sudo reboot` → ④ STM32 연결 → ⑤ `ip link set can0 up ... restart-ms 100`.
+- **`restart-ms`가 자꾸 0으로 돌아감** → `ip link down/up` 하면 초기화됩니다. up 할 때마다 `restart-ms 100`을 함께 지정하세요.
+- **루프백은 되는데 실제 통신이 안 됨** → 루프백은 어댑터 내부에서만 도는 테스트라 **GND를 타지 않습니다.** 어댑터 결백만 증명할 뿐 버스 전체의 건강을 보장하지 않습니다.
+- **종단 저항 확인** → 전원을 끄고 CAN_H ↔ CAN_L 저항 측정. **60Ω**(120Ω 두 개 병렬)이 정상. 120Ω이면 한쪽만, ∞면 단선, 0Ω이면 단락입니다.
+
+**모터 제어**
+
+- **저속에서만 모터가 "덜컹거리고 휙 튐", 후진·좌회전에서 특히 심함** → **PWM 주파수가 모터 드라이버 스펙을 초과**한 것. MDD10A 권장 상한은 20kHz인데, TIM1 `Prescaler=15`이면 `84MHz / 16 / 256 ≈ 20.5kHz`로 살짝 넘깁니다. 낮은 duty(저속)에서 온 시간이 MOSFET 스위칭 시간에 근접해 전류가 제대로 흐르지 않습니다. `Prescaler=87`로 약 3.7kHz까지 낮추면 해결됩니다. **"Arduino에서는 문제없었다"가 결정적 단서** — `analogWrite`는 490Hz입니다.
+- **바퀴가 명령의 약 31배 속도로 회전** → `SystemInterface`에서 단위 변환 누락. `diff_drive_controller`는 바퀴 조인트에 **rad/s**를 명령하고, 드라이버는 **m/s**를 받습니다. `write()`에서 `× wheel_radius`, `read()`에서 `÷ wheel_radius`. 첫 테스트는 반드시 바퀴를 띄우고 하세요.
+- **`ros2 service call`로 명령하면 1~3초 지연** → 제어 경로가 아니라 **CLI의 노드 생성·디스커버리 오버헤드**입니다. candump 타임스탬프로 "RPDO 값이 바뀐 시점 → 모터 반응"을 재면 약 42ms(제어주기 2사이클)로 정상입니다. 실제 주행에서는 연결이 유지되므로 이 지연이 없습니다.
+
+**ros2_control 통합**
+
+- **`Unable to parse the value of parameter robot_description as yaml`** → `Command([...])` 결과를 `ParameterValue(..., value_type=str)`로 감싸세요. URDF 문자열을 launch가 YAML로 파싱하려다 실패하는 것입니다.
+- **`undefined symbol: ...NodeCanopenDualAxisDriver...`** → 템플릿 구현이 인스턴스화되지 않은 것. 껍데기 `.cpp`에서도 `_impl.hpp`를 include 하고, 별도 `.cpp`에 명시적 인스턴스화(`template class X<rclcpp::Node>;`)를 넣으세요.
+- **`Loader for controller 'diff_drive_controller' not found`** → `sudo apt install ros-humble-diff-drive-controller`. `ros2 control` 명령이 없으면 `ros-humble-ros2controlcli`도 설치.
+- **`ros2_control_node`가 즉시 종료 (`exit code 1`), `failed to load shared library 'librmw_cyclonedds_cpp.so' ... libddsc.so.0: cannot open shared object file`** → **setcap과 CycloneDDS의 충돌**입니다. capability가 부여된 실행 파일은 보안상 `LD_LIBRARY_PATH`가 무시되어 DDS 라이브러리를 찾지 못합니다. 라이브러리 경로를 시스템에 등록하세요.
+  ```bash
+  find / -name "libddsc.so*" 2>/dev/null      # 실제 위치 확인 (Pi는 aarch64-linux-gnu 하위)
+
+  sudo tee /etc/ld.so.conf.d/ros-humble.conf << 'EOF'
+  /opt/ros/humble/lib
+  /opt/ros/humble/lib/aarch64-linux-gnu
+  EOF
+  sudo ldconfig
+  ldconfig -p | grep libddsc                  # 경로가 출력되면 성공
+  ```
+  ROS2는 아키텍처별 하위 폴더(`aarch64-linux-gnu`)에 DDS 라이브러리를 두므로 **상위 `lib`만 등록하면 안 됩니다.**
+- **`spawner`가 `/controller_manager/list_controllers`를 무한 대기** → `controller_manager`가 안 뜬 것입니다. `robot_state_publisher`와는 무관하니, 로그 맨 앞에서 `ros2_control_node`가 왜 죽었는지 먼저 확인하세요(위 항목이 흔한 원인).
+- **`Could not enable FIFO RT scheduling policy`** → 실시간 우선순위 미부여. `realtime` 그룹을 만들고 `/etc/security/limits.d/`에 `rtprio 99`를 설정한 뒤 재로그인. 50Hz 제어에는 없어도 동작하지만, EKF가 주기를 못 맞추는 원인이 될 수 있습니다.
+- **`slam_toolbox: Message Filter dropping message: frame 'base_scan' ... queue is full`** → `robot_state_publisher`가 **두 개** 떠서 TF 타임스탬프가 뒤섞인 것. `ros2 node list | grep robot_state`로 확인하고, `robot_control.launch.py`를 include할 때 `use_robot_state_publisher: 'false'`를 넘기세요.
+- **RViz에서 로봇 모델이 사라지거나 바퀴 TF가 고정됨** → `/joint_states` 발행자가 여러 개인지 확인(`ros2 topic info /joint_states --verbose`). 실물에서는 `joint_state_broadcaster` 하나만 있어야 합니다. `joint_state_publisher`(URDF만 보고 0 발행)와 커스텀 드라이버의 자체 발행을 모두 끄세요.
+
+**원격 시각화 (무선)**
+
+- **RViz가 매우 끊기는데 대역폭은 여유 있음** → 총량(약 70KB/s)이 아니라 **지터**가 문제입니다. `ros2 topic hz`를 Pi와 PC에서 각각 재보면, PC 쪽만 `std dev`가 10배 이상 커지고 `min: 0.000s / max: 0.350s`처럼 메시지가 뭉쳐서 도착합니다. **CycloneDDS로 교체하면 크게 개선**됩니다.
+  ```bash
+  sudo apt install ros-humble-rmw-cyclonedds-cpp        # Pi와 PC 양쪽
+  echo 'export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp' >> ~/.bashrc
+  ```
+  **반드시 양쪽 모두** 설정해야 합니다(한쪽만 바꾸면 통신 자체가 끊깁니다). 추가로 RViz의 TF 디스플레이를 끄거나 표시 프레임을 줄이면 렌더링 부하가 줄어듭니다.
+- **`New subscription discovered on topic '/scan', requesting incompatible QoS`** → 구독자 중 하나가 RELIABLE로 붙은 것. 라이다는 BEST_EFFORT로 발행하므로 RViz의 LaserScan Reliability를 `Best Effort`로 맞추세요.
 
 ---
 

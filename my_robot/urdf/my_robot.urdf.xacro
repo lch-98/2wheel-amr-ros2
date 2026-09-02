@@ -398,4 +398,20 @@
     <kp>1000000.0</kp><kd>100.0</kd>
   </gazebo>
 
+  <!-- ══════════════════════════════════════════════
+       ros2_control (실제 로봇 전용)
+       use_ros2_control:=true 일 때만 활성화
+  ══════════════════════════════════════════════ -->
+  <xacro:arg name="use_ros2_control" default="false"/>
+  <xacro:arg name="bus_config" default="/home/lch/robot_ws/install/my_robot_canopen/share/my_robot_canopen/config/my_robot/bus.yml"/>
+  <xacro:arg name="master_config" default="/home/lch/robot_ws/install/my_robot_canopen/share/my_robot_canopen/config/my_robot/master.dcf"/>
+
+  <xacro:if value="$(arg use_ros2_control)">
+    <xacro:include filename="$(find my_robot)/urdf/my_robot_ros2_control.xacro"/>
+    <xacro:my_robot_ros2_control
+        bus_config="$(arg bus_config)"
+        master_config="$(arg master_config)"
+        can_interface="can0"/>
+  </xacro:if>
+
 </robot>

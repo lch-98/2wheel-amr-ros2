@@ -1,0 +1,72 @@
+options:
+  dcf_path: "/home/lch/robot_ws/install/my_robot_canopen/share/my_robot_canopen/config/my_robot"
+
+master:
+  node_id: 2
+  driver: "ros2_canopen::MasterDriver"
+  package: "canopen_master_driver"
+  baudrate: 500                          # 500kbps > 500000bps
+  sync_period: 20000                     # 20000us > 20ms
+
+motor:
+  node_id: 1
+  boot_timeout_ms: 5000
+  dcf: "my_robot.eds"
+  driver: "ros2_canopen::DualAxisDriver" # ← 변경
+  package: "my_dual_axis_driver"         # ← 변경
+  period: 20                             # 20ms
+  scale_pos_to_dev: 1000.0
+  scale_pos_from_dev: 0.001
+  scale_vel_to_dev: 1000.0
+  scale_vel_from_dev: 0.001
+  velocity_mode: 3
+  rpdo:
+    1:
+      enabled: true
+      cob_id: "auto"
+      mapping:
+        - {index: 0x6040, sub_index: 0}
+        - {index: 0x6060, sub_index: 0}
+    2:
+      enabled: true
+      cob_id: "auto"
+      mapping:
+        - {index: 0x60FF, sub_index: 0}
+    3:
+      enabled: true
+      cob_id: "auto"
+      mapping:
+        - {index: 0x6840, sub_index: 0}
+        - {index: 0x6860, sub_index: 0}
+    4:
+      enabled: true
+      cob_id: "auto"
+      mapping:
+        - {index: 0x68FF, sub_index: 0}
+  tpdo:
+    1:
+      enabled: true
+      cob_id: "auto"
+      transmission: 0x01
+      mapping:
+        - {index: 0x6041, sub_index: 0}
+        - {index: 0x6061, sub_index: 0}
+    2:
+      enabled: true
+      cob_id: "auto"
+      transmission: 0x01
+      mapping:
+        - {index: 0x606C, sub_index: 0}
+    3:
+      enabled: true
+      cob_id: "auto"
+      transmission: 0x01
+      mapping:
+        - {index: 0x6841, sub_index: 0}
+        - {index: 0x6861, sub_index: 0}
+    4:
+      enabled: true
+      cob_id: "auto"
+      transmission: 0x01
+      mapping:
+        - {index: 0x686C, sub_index: 0}
