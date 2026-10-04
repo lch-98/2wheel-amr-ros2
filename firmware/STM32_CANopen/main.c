@@ -65,10 +65,10 @@ main.c USER CODE 구역 교체 코드
 
 미구현 (하드웨어/범위 문제, TODO 주석 참고):
   ⬜ Fault 상태               → 전류/온도 센서 필요
-  ⬜ Quick Stop        → 감속 프로파일 로직 필요
-  ⬜ Halt              → 감속 프로파일 로직 필요
-  ⬜ 가속/감속 프로파일     → OD 항목(0x6083/0x6084) 추가 필요
-  ⬜ 실제 파워단 제어         → 릴레이 또는 EN핀 드라이버 필요
+  ⬜ Quick Stop            → 감속 프로파일 로직 필요
+  ⬜ Halt                  → 감속 프로파일 로직 필요
+  ⬜ 가속/감속 프로파일          → OD 항목(0x6083/0x6084) 추가 필요
+  ⬜ 실제 파워단 제어            → 릴레이 또는 EN핀 드라이버 필요
 */
 // ── 로봇 스펙 ──
 #define ENCODER_CPR         1320.0f
@@ -96,25 +96,36 @@ typedef enum {
     CIA402_SWITCH_ON_DISABLED = 0,
     CIA402_READY_TO_SWITCH_ON,
     CIA402_SWITCHED_ON,
-    CIA402_OPERATION_ENABLED
-    // TODO(Fault):     CIA402_FAULT,            전류/온도 센서 추가 시
+    CIA402_OPERATION_ENABLED,
+    CIA402_FAULT
     // TODO(QuickStop): CIA402_QUICK_STOP_ACTIVE, 감속 프로파일 구현 시
+    // 참고: CiA402 의 Fault Reaction Active 는 생략했다.
+    //       본 구현의 고장 반응은 즉시 차단(PWM 0 + 릴레이 OFF)이라
+    //       머무를 시간이 없어 바로 Fault 로 간다.
 } Cia402State;
 
-// ── Statusword 값 (CiA 402 표준) ──
+// ── Statusword 값 (CiA 402 표준, 0x006F 마스크 기준) ──
 #define SW_SWITCH_ON_DISABLED   0x0040
 #define SW_READY_TO_SWITCH_ON   0x0021
 #define SW_SWITCHED_ON          0x0023
 #define SW_OPERATION_ENABLED    0x0027
-// TODO(Fault): #define SW_FAULT  0x0008
+#define SW_FAULT                0x0008
 
 // ── Controlword 명령 (하위 비트만 사용) ──
 #define CW_SHUTDOWN             0x06    // → Ready to Switch On
 #define CW_SWITCH_ON            0x07    // → Switched On
 #define CW_ENABLE_OPERATION     0x0F    // → Operation Enabled
 #define CW_DISABLE_VOLTAGE      0x00    // → Switch On Disabled
-// TODO(Fault):     #define CW_FAULT_RESET  0x80  (비트7)
+#define CW_FAULT_RESET_BIT      0x0080  // 비트7, 상승 에지에서 동작
 // TODO(QuickStop): Controlword 비트2를 0으로 → Quick Stop
+
+// ── 고장 코드 (0x603F Error code 에 쓸 값) ──
+//    0x2310 / 0x8130 은 CiA 301 표준 코드.
+//    0xFF.. 구간은 제조사 정의 구간이라 E-Stop 은 여기서 임의로 정했다.
+#define ERR_NONE                0x0000
+#define ERR_ESTOP               0xFF01  // 제조사 정의 — 비상정지
+#define ERR_OVERCURRENT         0x2310  // 표준 — 연속 과전류 (STEP 5 에서 사용)
+#define ERR_HEARTBEAT           0x8130  // 표준 — 하트비트/라이프가드 (STEP 2 에서 사용)
 
 // ── 운전 모드 (0x6060) ──
 #define MODE_PROFILE_VELOCITY   3
@@ -137,7 +148,7 @@ typedef struct {
     int8_t*            od_mode_display;
     int32_t*           od_target;
     int32_t*           od_actual;
-
+    int32_t*           od_position;   // 0x6064 / 0x6864
     // CiA 402 상태
     Cia402State        state;
     uint16_t           prev_controlword;
@@ -147,6 +158,7 @@ typedef struct {
     float    actual_vel;
     float    integral;
     float    prev_error;
+    int32_t  position_cnt;            // 누적 엔코더 카운트
 
     // 디버그
     float    dbg_pwm_f;
@@ -168,6 +180,38 @@ MotorAxis axis_r;
 MotorAxis axis_l;
 
 uint32_t prev_control_ms = 0;
+
+/* ── 릴레이 / E-Stop ─────────────────────────────────────── */
+#define RELAY_WIRING_TEST   0      /* 1 = 배선 확인 모드,  0 = 평소 동작 */
+
+#define RELAY_PORT   GPIOC
+#define RELAY_PIN    GPIO_PIN_0    /* 릴레이 IN   (LOW = ON) */
+#define ESTOP_PORT   GPIOC
+#define ESTOP_PIN    GPIO_PIN_1    /* E-Stop 감지 (HIGH = 정상) */
+
+/* E-Stop 해제를 인정하기까지 필요한 안정 시간.
+   누름은 즉시 반영하고 해제만 기다린다 — 안전 쪽으로 치우치게. */
+#define ESTOP_RELEASE_STABLE_MS   50
+
+/* 릴레이 접점이 붙고 모터 드라이버가 기동하기까지 기다리는 시간.
+   이 시간이 지나기 전에는 PWM 을 내보내지 않는다. */
+#define POWER_SETTLE_MS           50
+
+/* ── 드라이브 전역 상태 ─────────────────────────────────────
+   축별이 아니라 드라이브 전체에 걸리는 값들.
+   차동구동이라 한 축만 세우면 로봇이 제자리에서 돌아버리므로
+   고장은 항상 두 축에 동시에 적용한다.                        */
+static volatile uint16_t g_fault_code   = ERR_NONE;  /* 0 이면 정상 */
+static volatile uint8_t  g_estop_ok     = 0;         /* 1 = 해제됨(정상) */
+static uint32_t          g_estop_ok_ms  = 0;         /* 해제가 시작된 시각 */
+static uint8_t           g_power_on     = 0;         /* 릴레이 현재 상태 */
+static uint32_t          g_power_on_ms  = 0;         /* 릴레이를 켠 시각 */
+
+/* NMT 가 한 번이라도 Operational 에 도달했는지.
+   부팅 직후에는 Pre-operational 이 정상이므로,
+   이 래치가 서기 전까지는 통신 두절로 보지 않는다. */
+static uint8_t g_nmt_was_op = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -178,8 +222,23 @@ static void MX_TIM10_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM4_Init(void);
-/* USER CODE BEGIN PFP */
 
+/* USER CODE BEGIN PFP */
+/* ── 전방 선언 ───────────────────────────────────────────────
+   정의 순서보다 먼저 호출되는 함수들.
+   예: relayGpioInit() 이 estopReleased() 를 부르는데,
+       estopReleased() 의 정의는 파일에서 더 아래에 있다.      */
+void    setMotorAxis(MotorAxis* ax, int pwm);
+void    resetControlState(MotorAxis* ax);
+uint8_t powerReady(void);
+
+void    setPowerStage(uint8_t on);
+uint8_t estopReleased(void);
+void    updateEstop(void);
+void    raiseFault(uint16_t code);
+void    updateDriveSafety(void);
+void    updatePowerStage(void);
+uint8_t nmtOperational(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -217,6 +276,14 @@ void resetControlState(MotorAxis* ax)
     ax->prev_error = 0.0f;
 }
 
+// ── 파워단이 출력을 받을 준비가 됐는가 ──
+//    릴레이 접점이 붙는 데 약 10ms, 모터 드라이버 기동에 추가 시간이 걸린다.
+//    그 전에 PWM 을 때리면 첫 수십 ms 명령이 허공에 날아간다.
+uint8_t powerReady(void)
+{
+    return (g_power_on && (HAL_GetTick() - g_power_on_ms >= POWER_SETTLE_MS));
+}
+
 // ── CiA 402 상태 머신 처리 ──
 void updateStateMachine(MotorAxis* ax)
 {
@@ -241,8 +308,8 @@ void updateStateMachine(MotorAxis* ax)
             // 0x07 (Switch On) → Switched On
             if (cmd == CW_SWITCH_ON) {
                 ax->state = CIA402_SWITCHED_ON;
-                // TODO(PowerStage): 여기서 실제 파워단 전원 인가
-                  //  릴레이 추가 시: HAL_GPIO_WritePin(RELAY_PORT, RELAY_PIN, SET);
+                // 파워단(릴레이)은 updatePowerStage() 가 두 축 상태를 보고
+                // 판단한다. 릴레이가 좌우 공용이라 축 하나만 보고 켜면 안 된다.
             }
             // 0x00 (Disable Voltage) → 되돌아감
             else if (cmd == CW_DISABLE_VOLTAGE) {
@@ -259,7 +326,7 @@ void updateStateMachine(MotorAxis* ax)
             // 0x06 (Shutdown) → 되돌아감
             else if (cmd == CW_SHUTDOWN) {
                 ax->state = CIA402_READY_TO_SWITCH_ON;
-                // TODO(PowerStage): 파워단 전원 차단
+                // 파워단 차단도 updatePowerStage() 가 처리
             }
             else if (cmd == CW_DISABLE_VOLTAGE) {
                 ax->state = CIA402_SWITCH_ON_DISABLED;
@@ -284,15 +351,11 @@ void updateStateMachine(MotorAxis* ax)
             }
             break;
 
-        // TODO(Fault): Fault 상태 처리
-        //   case CIA402_FAULT:
-        //       if (cw & 0x80) {              // Fault Reset 비트
-        //           if (에러 원인 해소됨) {
-        //               ax->fault_code = 0;
-        //               ax->state = CIA402_SWITCH_ON_DISABLED;
-        //           }
-        //       }
-        //       break;
+        case CIA402_FAULT:
+            // Fault 에서 빠져나오는 길은 Fault Reset 뿐이고,
+            // 그 처리는 드라이브 전체를 봐야 해서 updateDriveSafety() 가 맡는다.
+            // 여기서는 어떤 Controlword 가 와도 상태를 바꾸지 않는다.
+            break;
 
         default:
             ax->state = CIA402_SWITCH_ON_DISABLED;
@@ -311,7 +374,8 @@ void updateStateMachine(MotorAxis* ax)
             *ax->od_statusword = SW_SWITCHED_ON;         break;
         case CIA402_OPERATION_ENABLED:
             *ax->od_statusword = SW_OPERATION_ENABLED;   break;
-        // TODO(Fault): case CIA402_FAULT: *ax->od_statusword = SW_FAULT; break;
+        case CIA402_FAULT:
+            *ax->od_statusword = SW_FAULT;               break;
         default:
             *ax->od_statusword = SW_SWITCH_ON_DISABLED;  break;
     }
@@ -323,8 +387,9 @@ void updateStateMachine(MotorAxis* ax)
 // ── 축 하나의 PID 제어 ──
 void controlLoopAxis(MotorAxis* ax, float dt)
 {
-    // ── 0) CiA 402 상태 머신 먼저 처리 ──
-    updateStateMachine(ax);
+    // 상태 머신은 main 루프에서 따로 돌린다 (updateStateMachine).
+    // 제어 주기(20ms)보다 빠르게 반응해야 하고, 파워단 판단도
+    // 두 축을 함께 봐야 하기 때문에 여기서 분리했다.
 
     // ── 1) 엔코더 읽기 (상태와 무관하게 항상 측정) ──
     uint16_t curr_raw  = (uint16_t)__HAL_TIM_GET_COUNTER(ax->enc_tim);
@@ -339,17 +404,16 @@ void controlLoopAxis(MotorAxis* ax, float dt)
     *ax->od_actual = (int32_t)(ax->actual_vel * 1000.0f);
     ax->prev_enc_raw = curr_raw;
     ax->dbg_delta = delta;
+    ax->position_cnt += delta;
+    *ax->od_position = ax->position_cnt;
 
-    // TODO(Fault): 센서 추가 시 여기서 감지
-    //   ax->current_a = readCurrentSensor(ax);
-    //   if (ax->current_a > MAX_CURRENT) {
-    //       ax->state = CIA402_FAULT;
-    //       ax->fault_code = 0x2310;     // CiA 표준 과전류 코드
-    //       setMotorAxis(ax, 0);
-    //       return;
-    //   }
+    // TODO(STEP 5): INA226 추가 시 여기서 과전류 감지
+    //   ax->current_a = ina226Read(ax);
+    //   if (ax->current_a > MAX_CURRENT) raiseFault(ERR_OVERCURRENT);
+    //   → raiseFault() 가 두 축을 모두 Fault 로 내린다
 
     // ── 2) Operation Enabled 아니면 모터 정지 (게이트) ──
+    //    Fault 상태도 여기에 걸려서 출력이 막힌다.
     if (ax->state != CIA402_OPERATION_ENABLED) {
         setMotorAxis(ax, 0);
         ax->integral   = 0.0f;
@@ -359,6 +423,15 @@ void controlLoopAxis(MotorAxis* ax, float dt)
         ax->dbg_error  = 0.0f;
         ax->dbg_ff     = 0.0f;
         return;      // 목표속도를 무시함
+    }
+
+    // ── 2-1) 파워단이 아직 안정되지 않았으면 출력 금지 ──
+    if (!powerReady()) {
+        setMotorAxis(ax, 0);
+        ax->integral   = 0.0f;
+        ax->prev_error = 0.0f;
+        ax->dbg_pwm_f  = 0.0f;
+        return;
     }
 
     // ── 3) 운전 모드 확인 (Profile Velocity만 지원) ──
@@ -434,6 +507,7 @@ void initAxes(void)
     axis_r.od_mode_display = &OD_RAM.x6061_modesOfOperationDisplay;
     axis_r.od_target       = &OD_RAM.x60FF_targetVelocity;
     axis_r.od_actual       = &OD_RAM.x606C_velocityActualValue;
+    axis_r.od_position     = &OD_RAM.x6064_positionActualValue;
 
     // ── 왼쪽 (축2, 0x68xx) ──
     axis_l.enc_tim         = &htim4;
@@ -449,6 +523,7 @@ void initAxes(void)
     axis_l.od_mode_display = &OD_RAM.x6861_modesOfOperationDisplayAxis2;
     axis_l.od_target       = &OD_RAM.x68FF_targetVelocityAxis2;
     axis_l.od_actual       = &OD_RAM.x686C_velocityActualValueAxis2;
+    axis_l.od_position     = &OD_RAM.x6864_positionActualValueAxis2;
 
     // 상태 초기화
     axis_r.state = axis_l.state = CIA402_SWITCH_ON_DISABLED;
@@ -459,12 +534,176 @@ void initAxes(void)
     axis_r.actual_vel = axis_l.actual_vel = 0.0f;
     axis_r.integral   = axis_l.integral   = 0.0f;
     axis_r.prev_error = axis_l.prev_error = 0.0f;
+    axis_r.position_cnt = axis_l.position_cnt = 0;
 
     // Statusword 초기값
     OD_RAM.x6041_statusword      = SW_SWITCH_ON_DISABLED;
     OD_RAM.x6841_statuswordAxis2 = SW_SWITCH_ON_DISABLED;
 }
 
+// ── 릴레이 / E-Stop GPIO 초기화 ────────────────────────────
+static void relayGpioInit(void)
+{
+    GPIO_InitTypeDef gpio = {0};
+
+    /* 반드시 값을 먼저 쓴다.
+       출력 레지스터 초기값이 0 이라서, 순서를 바꾸면 핀을 출력으로
+       설정하는 순간 LOW 가 나가면서 부팅할 때마다 릴레이가 잠깐 붙는다. */
+    HAL_GPIO_WritePin(RELAY_PORT, RELAY_PIN, GPIO_PIN_SET);   /* SET = OFF */
+
+    gpio.Pin   = RELAY_PIN;
+    gpio.Mode  = GPIO_MODE_OUTPUT_PP;      /* 푸시풀 */
+    gpio.Pull  = GPIO_NOPULL;
+    gpio.Speed = GPIO_SPEED_FREQ_LOW;      /* 릴레이는 빠를 필요 없음 */
+    HAL_GPIO_Init(RELAY_PORT, &gpio);
+
+    gpio.Pin  = ESTOP_PIN;
+    gpio.Mode = GPIO_MODE_INPUT;
+    gpio.Pull = GPIO_NOPULL;               /* 외부 10kΩ 풀다운을 쓴다 */
+    HAL_GPIO_Init(ESTOP_PORT, &gpio);
+
+    /* 부팅 시점의 E-Stop 상태를 한 번 확정해 둔다.
+       g_estop_ok 를 0 으로 둔 채 시작하면, 해제 안정 시간(50ms) 동안
+       눌린 것으로 보여서 기동하자마자 Fault 가 걸려버린다.
+       반대로 정말 눌린 채 부팅했다면 여기서 0 이 되어 Fault 가 걸린다 — 의도된 동작. */
+    HAL_Delay(1);                          /* 핀 설정 직후 안정화 */
+    g_estop_ok    = estopReleased();
+    g_estop_ok_ms = HAL_GetTick();
+}
+
+// 파워단 제어 — LOW 가 ON 임에 주의
+void setPowerStage(uint8_t on)
+{
+    HAL_GPIO_WritePin(RELAY_PORT, RELAY_PIN,
+                      on ? GPIO_PIN_RESET : GPIO_PIN_SET);
+}
+
+// 1 = E-Stop 해제됨(정상),  0 = 눌림
+uint8_t estopReleased(void)
+{
+    return (HAL_GPIO_ReadPin(ESTOP_PORT, ESTOP_PIN) == GPIO_PIN_SET);
+}
+
+// ── E-Stop 상태 확정 ──────────────────────────────────────
+//    누름은 즉시 반영하고, 해제는 ESTOP_RELEASE_STABLE_MS 동안
+//    유지돼야 인정한다. 접점 바운스나 노이즈로 순간 풀린 것처럼
+//    보여도 모터가 다시 돌지 않게 하려는 비대칭 처리다.
+void updateEstop(void)
+{
+    uint32_t now = HAL_GetTick();
+
+    if (!estopReleased()) {
+        g_estop_ok    = 0;
+        g_estop_ok_ms = now;          // 눌려 있는 동안 계속 갱신
+    } else if (!g_estop_ok) {
+        if (now - g_estop_ok_ms >= ESTOP_RELEASE_STABLE_MS) {
+            g_estop_ok = 1;
+        }
+    }
+}
+
+// ── NMT 가 Operational 인가 ────────────────────────────────
+//    하트비트 소비자(0x1016)가 타임아웃되면 0x1029 설정에 따라
+//    CANopenNode 가 NMT 를 Pre-operational 로 내린다.
+uint8_t nmtOperational(void)
+{
+    if (canopenNodeSTM32 == NULL)               return 0;
+    if (canopenNodeSTM32->canOpenStack == NULL) return 0;
+    if (canopenNodeSTM32->canOpenStack->NMT == NULL) return 0;
+
+    return (canopenNodeSTM32->canOpenStack->NMT->operatingState
+            == CO_NMT_OPERATIONAL);
+}
+
+// ── 고장 발생 ─────────────────────────────────────────────
+//    최초 원인을 유지한다. 한 고장이 다른 고장을 부르는 경우
+//    나중 코드로 덮어쓰면 진짜 원인을 못 찾는다.
+void raiseFault(uint16_t code)
+{
+    if (g_fault_code == ERR_NONE) {
+        g_fault_code = code;
+    }
+}
+
+// ── 드라이브 전체 안전 감시 ───────────────────────────────
+//    매 루프 호출한다. 제어 주기(20ms)를 기다리지 않는다.
+void updateDriveSafety(void)
+{
+    updateEstop();
+
+    // 1) E-Stop 이 눌려 있으면 고장
+    if (!g_estop_ok) {
+        raiseFault(ERR_ESTOP);
+    }
+
+    // 1-1) 통신 두절 — 한 번 Operational 이 된 뒤에만 판단한다.
+    //      부팅 직후의 Pre-operational 은 정상이므로 걸러야 한다.
+    if (nmtOperational()) {
+        g_nmt_was_op = 1;
+    } else if (g_nmt_was_op) {
+        raiseFault(ERR_HEARTBEAT);     // 0x8130
+    }
+
+    // 2) 고장이면 두 축 모두 즉시 출력 차단 (PWM 을 먼저 내린다)
+    //    전류가 흐르는 상태로 릴레이 접점을 열면 아크로 접점이 상한다.
+    if (g_fault_code != ERR_NONE) {
+        if (axis_r.state != CIA402_FAULT) {
+            setMotorAxis(&axis_r, 0);
+            resetControlState(&axis_r);
+            axis_r.state = CIA402_FAULT;
+        }
+        if (axis_l.state != CIA402_FAULT) {
+            setMotorAxis(&axis_l, 0);
+            resetControlState(&axis_l);
+            axis_l.state = CIA402_FAULT;
+        }
+    }
+
+    // 3) Fault Reset — Controlword 비트7 의 상승 에지
+    //    레벨이 아니라 에지로 보는 이유: 마스터가 비트7 을 세워둔 채로
+    //    두면 고장이 나자마자 계속 리셋되어 보호가 무력해진다.
+    if (g_fault_code != ERR_NONE) {
+        uint8_t edge_r = ( (*axis_r.od_controlword & CW_FAULT_RESET_BIT) &&
+                          !(axis_r.prev_controlword & CW_FAULT_RESET_BIT) );
+        uint8_t edge_l = ( (*axis_l.od_controlword & CW_FAULT_RESET_BIT) &&
+                          !(axis_l.prev_controlword & CW_FAULT_RESET_BIT) );
+
+        // 원인이 해소돼야 풀린다. E-Stop 이 눌린 채로는 리셋이 안 먹는다.
+        if ((edge_r || edge_l) && g_estop_ok) {
+            g_fault_code = ERR_NONE;
+            axis_r.state = CIA402_SWITCH_ON_DISABLED;
+            axis_l.state = CIA402_SWITCH_ON_DISABLED;
+            resetControlState(&axis_r);
+            resetControlState(&axis_l);
+        }
+    }
+}
+
+// ── 파워단(릴레이) 제어 ───────────────────────────────────
+//    릴레이는 좌우 공용이므로 두 축 상태를 모두 보고 판단한다.
+//    아무 조건도 성립하지 않으면 꺼진다 (평상시 비여자).
+void updatePowerStage(void)
+{
+    uint8_t want_on = 0;
+
+    if (g_estop_ok && g_fault_code == ERR_NONE) {
+        if (axis_r.state == CIA402_SWITCHED_ON ||
+            axis_r.state == CIA402_OPERATION_ENABLED ||
+            axis_l.state == CIA402_SWITCHED_ON ||
+            axis_l.state == CIA402_OPERATION_ENABLED) {
+            want_on = 1;
+        }
+    }
+
+    if (want_on && !g_power_on) {
+        g_power_on    = 1;
+        g_power_on_ms = HAL_GetTick();
+        setPowerStage(1);
+    } else if (!want_on && g_power_on) {
+        g_power_on = 0;
+        setPowerStage(0);
+    }
+}
 /* USER CODE END 0 */
 
 /**
@@ -521,6 +760,9 @@ int main(void)
   // 축 초기화
   initAxes();
   prev_control_ms = HAL_GetTick();
+
+  // 릴레이 / E-Stop 초기화 (부팅 직후 릴레이는 OFF 상태)
+  relayGpioInit();
   /* USER CODE END 2 */
 
   /* Initialize leds */
@@ -536,16 +778,55 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	canopen_app_process();
 
-	uint32_t now = HAL_GetTick();
-	if (now - prev_control_ms >= CONTROL_PERIOD_MS) {
-		float dt = (now - prev_control_ms) / 1000.0f;
-	    prev_control_ms = now;
+	/* E-Stop 상태 표시 ㅡ 두 모드 공통
+	   LD2 켜짐 = 정상, 꺼짐 = E-Stop 눌림 */
+	if (estopReleased()) BSP_LED_On(LED2);
+	else                 BSP_LED_Off(LED2);
 
-	    controlLoopAxis(&axis_r, dt);
-	    controlLoopAxis(&axis_l, dt);
-	}
+	#if RELAY_WIRING_TEST
+		/* ───────── 배선 확인 모드 ─────────
+		   CAN 과 모터 제어를 멈추고 릴레이만 단독으로 본다.
+		   확인이 끝나면 RELAY_WIRING_TEST 를 0 으로 바꾼다.        */
+		{
+			static uint32_t t0 = 0;
+			static uint8_t  on = 0;
+
+			/* 2초마다 릴레이 ON / OFF 반복 */
+			if (HAL_GetTick() - t0 >= 2000) {
+				t0 = HAL_GetTick();
+				on = !on;
+				setPowerStage(on);
+			}
+		}
+
+	#else
+		/* ───────── 평소 동작 ───────── */
+		canopen_app_process();
+
+		/* ① 안전 감시 — 매 루프. E-Stop 감지, 축간 고장 전파,
+		      Fault Reset 처리. 제어 주기를 기다리지 않는다.      */
+		updateDriveSafety();
+
+		/* ② CiA402 상태 머신 — 매 루프.
+		      Controlword 를 받아 상태를 옮기고 Statusword 를 갱신한다. */
+		updateStateMachine(&axis_r);
+		updateStateMachine(&axis_l);
+
+		/* ③ 파워단(릴레이) — 두 축 상태를 보고 결정 */
+		updatePowerStage();
+
+		/* ④ PID 제어 — 20ms 주기 */
+		uint32_t now = HAL_GetTick();
+		if (now - prev_control_ms >= CONTROL_PERIOD_MS) {
+			float dt = (now - prev_control_ms) / 1000.0f;
+			prev_control_ms = now;
+
+			controlLoopAxis(&axis_r, dt);
+			controlLoopAxis(&axis_l, dt);
+		}
+	#endif
+
   }
   /* USER CODE END 3 */
 }

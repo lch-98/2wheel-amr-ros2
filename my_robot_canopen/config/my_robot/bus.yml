@@ -7,19 +7,28 @@ master:
   package: "canopen_master_driver"
   baudrate: 500                          # 500kbps > 500000bps
   sync_period: 20000                     # 20000us > 20ms
+  heartbeat_producer: 100                # 0x1017 — 마스터가 100ms 마다 0x702 송신
+  heartbeat_multiplier: 3                # 슬레이브 0x1016 = 100 × 3 = 300ms
 
 motor:
   node_id: 1
   boot_timeout_ms: 5000
   dcf: "my_robot.eds"
-  driver: "ros2_canopen::DualAxisDriver" # ← 변경
-  package: "my_dual_axis_driver"         # ← 변경
+  driver: "ros2_canopen::Cia402Driver"   # upstream 드라이버 (백포트 버전)
+  package: "canopen_402_driver"
   period: 20                             # 20ms
-  scale_pos_to_dev: 1000.0
-  scale_pos_from_dev: 0.001
-  scale_vel_to_dev: 1000.0
-  scale_vel_from_dev: 0.001
-  velocity_mode: 3
+  heartbeat_consumer: true               # 0x1016 — 슬레이브가 마스터를 감시
+  heartbeat_producer: 100                # 0x1017 — 슬레이브 하트비트를 1000ms → 100ms
+  heartbeat_multiplier: 3                # 마스터 0x1016 = 100 × 3 = 300ms
+  # error_behavior 는 0x1029 가 없으므로 넣지 않는다
+  # ── 다축(CiA 402-2) 설정 ──
+  num_channels: 2
+  channel_names: ["right_wheel", "left_wheel"]   # ch0 = 0x60xx = 오른쪽, ch1 = 0x68xx = 왼쪽
+  # ── 단위 환산 (펌웨어: 속도 mm/s, 위치 엔코더 카운트 / ROS: rad/s, rad) ──
+  scale_vel_to_dev: 32.5            # rad/s → mm/s   = 바퀴 반지름 0.0325 m × 1000
+  scale_vel_from_dev: 0.03076923    # mm/s  → rad/s  = 1 / 32.5
+  scale_pos_to_dev: 210.08452       # rad   → count  = 1320 / (2π)
+  scale_pos_from_dev: 0.00475999    # count → rad    = (2π) / 1320
   rpdo:
     1:
       enabled: true
@@ -57,6 +66,7 @@ motor:
       transmission: 0x01
       mapping:
         - {index: 0x606C, sub_index: 0}
+        - {index: 0x6064, sub_index: 0}
     3:
       enabled: true
       cob_id: "auto"
@@ -70,3 +80,4 @@ motor:
       transmission: 0x01
       mapping:
         - {index: 0x686C, sub_index: 0}
+        - {index: 0x6864, sub_index: 0}

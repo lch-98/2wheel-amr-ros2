@@ -7,7 +7,7 @@
     <ros2_control name="MyRobotCanopenSystem" type="system">
 
       <hardware>
-        <plugin>my_dual_axis_driver/DualAxisSystem</plugin>
+        <plugin>canopen_ros2_control/Cia402System</plugin>
         <param name="bus_config">${bus_config}</param>
         <param name="master_config">${master_config}</param>
         <param name="can_interface_name">${can_interface}</param>
@@ -16,8 +16,7 @@
       <!-- 축 0 = 0x6000 (오른쪽) -->
       <joint name="wheel_right_joint">
         <param name="node_id">1</param>
-        <param name="axis">0</param>
-        <param name="wheel_radius">0.0325</param>
+        <param name="channel">0</param>
         <command_interface name="velocity"/>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
@@ -26,8 +25,7 @@
       <!-- 축 1 = 0x6800 (왼쪽) -->
       <joint name="wheel_left_joint">
         <param name="node_id">1</param>
-        <param name="axis">1</param>
-        <param name="wheel_radius">0.0325</param>
+        <param name="channel">1</param>
         <command_interface name="velocity"/>
         <state_interface name="position"/>
         <state_interface name="velocity"/>

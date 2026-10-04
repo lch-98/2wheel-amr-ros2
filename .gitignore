@@ -9,3 +9,7 @@ __pycache__/
 
 # 에디터 설정
 .vscode/
+
+# local backups
+*.bak
+*.2ch

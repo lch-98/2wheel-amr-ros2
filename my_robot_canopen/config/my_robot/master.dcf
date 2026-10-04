@@ -200,13 +200,13 @@ CompactSubObj=127
 
 [1016Value]
 NrOfEntries=1
-1=0x00010BB8
+1=0x0001012C
 
 [1017]
 ParameterName=Producer heartbeat time
 DataType=0x0006
 AccessType=rw
-DefaultValue=0
+DefaultValue=100
 
 [1018]
 SubNumber=5
@@ -450,11 +450,12 @@ ParameterName=RPDO mapping parameter
 ObjectType=0x09
 DataType=0x0007
 AccessType=rw
-CompactSubObj=1
+CompactSubObj=2
 
 [1601Value]
-NrOfEntries=1
+NrOfEntries=2
 1=0x20010120
+2=0x20010220
 
 [1602]
 ParameterName=RPDO mapping parameter
@@ -473,11 +474,12 @@ ParameterName=RPDO mapping parameter
 ObjectType=0x09
 DataType=0x0007
 AccessType=rw
-CompactSubObj=1
+CompactSubObj=2
 
 [1603Value]
-NrOfEntries=1
+NrOfEntries=2
 1=0x20030120
+2=0x20030220
 
 [1800]
 SubNumber=7
@@ -1478,7 +1480,7 @@ AccessType=rww
 PDOMapping=1
 
 [2001]
-SubNumber=2
+SubNumber=3
 ParameterName=Mapped application objects for RPDO 2
 ObjectType=0x09
 
@@ -1486,10 +1488,16 @@ ObjectType=0x09
 ParameterName=Highest sub-index supported
 DataType=0x0005
 AccessType=const
-DefaultValue=1
+DefaultValue=2
 
 [2001sub1]
 ParameterName=motor: Velocity Actual Value
+DataType=0x0004
+AccessType=rww
+PDOMapping=1
+
+[2001sub2]
+ParameterName=motor: Position Actual Value
 DataType=0x0004
 AccessType=rww
 PDOMapping=1
@@ -1518,7 +1526,7 @@ AccessType=rww
 PDOMapping=1
 
 [2003]
-SubNumber=2
+SubNumber=3
 ParameterName=Mapped application objects for RPDO 4
 ObjectType=0x09
 
@@ -1526,10 +1534,16 @@ ObjectType=0x09
 ParameterName=Highest sub-index supported
 DataType=0x0005
 AccessType=const
-DefaultValue=1
+DefaultValue=2
 
 [2003sub1]
 ParameterName=motor: Velocity Actual Value Axis2
+DataType=0x0004
+AccessType=rww
+PDOMapping=1
+
+[2003sub2]
+ParameterName=motor: Position Actual Value Axis2
 DataType=0x0004
 AccessType=rww
 PDOMapping=1
@@ -1655,11 +1669,12 @@ ParameterName=Remote TPDO mapping parameter
 ObjectType=0x08
 DataType=0x0007
 AccessType=rw
-CompactSubObj=1
+CompactSubObj=2
 
 [5A01Value]
-NrOfEntries=1
+NrOfEntries=2
 1=0x606C0020
+2=0x60640020
 
 [5A02]
 ParameterName=Remote TPDO mapping parameter
@@ -1678,11 +1693,12 @@ ParameterName=Remote TPDO mapping parameter
 ObjectType=0x08
 DataType=0x0007
 AccessType=rw
-CompactSubObj=1
+CompactSubObj=2
 
 [5A03Value]
-NrOfEntries=1
+NrOfEntries=2
 1=0x686C0020
+2=0x68640020
 
 [5C00]
 ParameterName=Remote RPDO number and node-ID
