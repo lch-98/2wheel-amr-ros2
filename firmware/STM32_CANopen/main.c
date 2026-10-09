@@ -113,26 +113,31 @@ typedef enum {
 #define SW_OPERATION_ENABLED    0x0027
 #define SW_FAULT                0x0008
 
-// ── Controlword 명령 (하위 비트만 사용) ──
-#define CW_SHUTDOWN             0x06    // → Ready to Switch On
-#define CW_SWITCH_ON            0x07    // → Switched On
-#define CW_ENABLE_OPERATION     0x0F    // → Operation Enabled
-#define CW_DISABLE_VOLTAGE      0x00    // → Switch On Disabled
-#define CW_FAULT_RESET_BIT      0x0080  // 비트7, 상승 에지에서 동작
+/* ── Controlword 명령 판정 (CiA 402 표준 비트 패턴) ──
+   (cw & MASK) == VAL 이면 그 명령이다. MASK 에 없는 비트는 무관(x) 비트.
+   모든 MASK 에 비트7(Fault Reset)이 들어 있어서, 비트7 이 서 있으면
+   어떤 명령에도 걸리지 않는다 (Fault Reset 은 updateDriveSafety() 가 따로 처리).
+   비트8(Halt) 등 상위 비트는 무시한다.
 
-/* ── Controlword 해석 (CiA 402 표준 비트 패턴) ──
-   명령마다 "보는 비트"가 다르다. x 는 무관(don't care) 비트.
-     Shutdown             0xxx x110   → (cw & 0x87) == 0x06
-     Switch On            0xxx 0111   → (cw & 0x8F) == 0x07
-     Switch On + Enable   0xxx 1111   → (cw & 0x8F) == 0x0F
-     Disable Voltage      0xxx xx0x   → (cw & 0x82) == 0x00
-     Quick Stop           0xxx x01x   → (cw & 0x86) == 0x02
-   예: 마스터가 Operation Enabled(0x0F) 이후 Fault Reset 을 거쳐 Shutdown 을 보낼 때
-       비트3(Enable Operation)을 지우지 않아 0x0E 가 온다. 비트3 은 Shutdown 에서
-       무관 비트이므로 0x0E 도 Shutdown 이다. 하위 4비트를 0x06 과 그대로 비교하면
-       이 명령을 놓쳐 Switch On Disabled 에 갇힌다.
-   비트7 이 서 있으면(Fault Reset 진행 중) 어떤 전이 명령으로도 보지 않는다.
-   비트8(Halt) 등 상위 비트는 무시한다.                                  */
+   주의: 하위 4비트를 통째로(& 0x0F) 0x06 과 비교하면 안 된다.
+         마스터는 Operation Enabled(0x0F) 이후 Fault Reset 을 거쳐 Shutdown 을 보낼 때
+         비트3(Enable Operation)을 지우지 않아 0x0E 를 보낸다. 비트3 은 Shutdown 에서
+         무관 비트이므로 0x0E 도 Shutdown 이다. 놓치면 Switch On Disabled 에 갇힌다.
+
+     명령                  패턴          MASK     VAL                               */
+#define CW_MASK_DISABLE_VOLTAGE 0x0082  /* 0xxx xx0x */
+#define CW_VAL_DISABLE_VOLTAGE  0x0000
+#define CW_MASK_QUICK_STOP      0x0086  /* 0xxx x01x */
+#define CW_VAL_QUICK_STOP       0x0002
+#define CW_MASK_SHUTDOWN        0x0087  /* 0xxx x110 */
+#define CW_VAL_SHUTDOWN         0x0006
+#define CW_MASK_SWITCH_ON       0x008F  /* 0xxx 0111 */
+#define CW_VAL_SWITCH_ON        0x0007
+#define CW_MASK_ENABLE_OP       0x008F  /* 0xxx 1111  (Switch On + Enable Operation) */
+#define CW_VAL_ENABLE_OP        0x000F
+
+#define CW_FAULT_RESET_BIT      0x0080  /* 비트7, 상승 에지에서 동작 */
+
 typedef enum {
     CMD_NONE = 0,
     CMD_SHUTDOWN,
@@ -144,12 +149,11 @@ typedef enum {
 
 static Cia402Command decodeControlword(uint16_t cw)
 {
-    if (cw & CW_FAULT_RESET_BIT)       return CMD_NONE;
-    if ((cw & 0x0002) == 0x0000)       return CMD_DISABLE_VOLTAGE;
-    if ((cw & 0x0006) == 0x0002)       return CMD_QUICK_STOP;
-    if ((cw & 0x0007) == 0x0006)       return CMD_SHUTDOWN;
-    if ((cw & 0x000F) == 0x0007)       return CMD_SWITCH_ON;
-    if ((cw & 0x000F) == 0x000F)       return CMD_ENABLE_OPERATION;
+    if ((cw & CW_MASK_DISABLE_VOLTAGE) == CW_VAL_DISABLE_VOLTAGE) return CMD_DISABLE_VOLTAGE;
+    if ((cw & CW_MASK_QUICK_STOP)      == CW_VAL_QUICK_STOP)      return CMD_QUICK_STOP;
+    if ((cw & CW_MASK_SHUTDOWN)        == CW_VAL_SHUTDOWN)        return CMD_SHUTDOWN;
+    if ((cw & CW_MASK_SWITCH_ON)       == CW_VAL_SWITCH_ON)       return CMD_SWITCH_ON;
+    if ((cw & CW_MASK_ENABLE_OP)       == CW_VAL_ENABLE_OP)       return CMD_ENABLE_OPERATION;
     return CMD_NONE;
 }
 // TODO(QuickStop): Controlword 비트2를 0으로 → Quick Stop
