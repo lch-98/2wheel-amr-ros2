@@ -59,9 +59,11 @@ main.c USER CODE 구역 교체 코드
 
 구현 범위 (방식 A - 최소 구현):
   ✅ Switch On Disabled → Ready to Switch On → Switched On → Operation Enabled
-  ✅ Controlword 0x00 / 0x06 / 0x07 / 0x0F 처리
+  ✅ Controlword 를 CiA 402 표준 비트 패턴으로 해석 (Shutdown 0x06/0x0E 등)
   ✅ Statusword 자동 갱신
   ✅ Operation Enabled 아니면 모터 정지 (게이트)
+  ✅ 두 축 모두 구동 준비일 때만 출력 (DRIVE_REQUIRE_ALL_AXES)
+  ✅ NMT Operational 일 때만 상태 전이·파워단 허용
 
 미구현 (하드웨어/범위 문제, TODO 주석 참고):
   ⬜ Fault 상태               → 전류/온도 센서 필요
@@ -117,6 +119,39 @@ typedef enum {
 #define CW_ENABLE_OPERATION     0x0F    // → Operation Enabled
 #define CW_DISABLE_VOLTAGE      0x00    // → Switch On Disabled
 #define CW_FAULT_RESET_BIT      0x0080  // 비트7, 상승 에지에서 동작
+
+/* ── Controlword 해석 (CiA 402 표준 비트 패턴) ──
+   명령마다 "보는 비트"가 다르다. x 는 무관(don't care) 비트.
+     Shutdown             0xxx x110   → (cw & 0x87) == 0x06
+     Switch On            0xxx 0111   → (cw & 0x8F) == 0x07
+     Switch On + Enable   0xxx 1111   → (cw & 0x8F) == 0x0F
+     Disable Voltage      0xxx xx0x   → (cw & 0x82) == 0x00
+     Quick Stop           0xxx x01x   → (cw & 0x86) == 0x02
+   예: 마스터가 Operation Enabled(0x0F) 이후 Fault Reset 을 거쳐 Shutdown 을 보낼 때
+       비트3(Enable Operation)을 지우지 않아 0x0E 가 온다. 비트3 은 Shutdown 에서
+       무관 비트이므로 0x0E 도 Shutdown 이다. 하위 4비트를 0x06 과 그대로 비교하면
+       이 명령을 놓쳐 Switch On Disabled 에 갇힌다.
+   비트7 이 서 있으면(Fault Reset 진행 중) 어떤 전이 명령으로도 보지 않는다.
+   비트8(Halt) 등 상위 비트는 무시한다.                                  */
+typedef enum {
+    CMD_NONE = 0,
+    CMD_SHUTDOWN,
+    CMD_SWITCH_ON,
+    CMD_ENABLE_OPERATION,
+    CMD_DISABLE_VOLTAGE,
+    CMD_QUICK_STOP
+} Cia402Command;
+
+static Cia402Command decodeControlword(uint16_t cw)
+{
+    if (cw & CW_FAULT_RESET_BIT)       return CMD_NONE;
+    if ((cw & 0x0002) == 0x0000)       return CMD_DISABLE_VOLTAGE;
+    if ((cw & 0x0006) == 0x0002)       return CMD_QUICK_STOP;
+    if ((cw & 0x0007) == 0x0006)       return CMD_SHUTDOWN;
+    if ((cw & 0x000F) == 0x0007)       return CMD_SWITCH_ON;
+    if ((cw & 0x000F) == 0x000F)       return CMD_ENABLE_OPERATION;
+    return CMD_NONE;
+}
 // TODO(QuickStop): Controlword 비트2를 0으로 → Quick Stop
 
 // ── 고장 코드 (0x603F Error code 에 쓸 값) ──
@@ -197,6 +232,14 @@ uint32_t prev_control_ms = 0;
    이 시간이 지나기 전에는 PWM 을 내보내지 않는다. */
 #define POWER_SETTLE_MS           50
 
+/* 두 축을 한 묶음으로 다룰지 정한다. 차동구동에서 한쪽만 돌면
+   로봇이 제자리에서 돌기 때문이다. (고장은 이 값과 무관하게 항상 두 축 동시)
+   1 = 릴레이: 두 축 모두 Switched On 이상일 때만 ON
+       PWM   : 두 축 모두 Operation Enabled + Profile Velocity 일 때만 출력  (평소)
+   0 = 릴레이: 한 축이라도 Switched On 이상이면 ON
+       PWM   : 축마다 따로 판단  (단일 채널 시험 등 한 축만 돌릴 때)      */
+#define DRIVE_REQUIRE_ALL_AXES    1
+
 /* ── 드라이브 전역 상태 ─────────────────────────────────────
    축별이 아니라 드라이브 전체에 걸리는 값들.
    차동구동이라 한 축만 세우면 로봇이 제자리에서 돌아버리므로
@@ -239,6 +282,9 @@ void    raiseFault(uint16_t code);
 void    updateDriveSafety(void);
 void    updatePowerStage(void);
 uint8_t nmtOperational(void);
+uint8_t axisPowerRequested(const MotorAxis* ax);
+uint8_t axisReadyToDrive(const MotorAxis* ax);
+uint8_t driveOutputAllowed(const MotorAxis* ax);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -289,63 +335,80 @@ void updateStateMachine(MotorAxis* ax)
 {
     uint16_t cw = *ax->od_controlword;
 
-    // Controlword 하위 4비트만 사용 (최소 구현)
-    // TODO(Fault):     비트7(0x80) Fault Reset 처리 추가
-    // TODO(QuickStop): 비트2(0x04) 확인해 Quick Stop 처리 추가
+    // CiA 402 표준 비트 패턴으로 해석 (decodeControlword 주석 참고)
+    // Fault Reset(비트7)은 드라이브 전체를 봐야 해서 updateDriveSafety() 가 처리한다.
+    // TODO(QuickStop): CMD_QUICK_STOP 처리 (감속 프로파일 필요) — 지금은 무시
     // TODO(Halt):      비트8(0x100) 확인해 Halt 처리 추가
-    uint16_t cmd = cw & 0x0F;
+    Cia402Command cmd = decodeControlword(cw);
+
+    // ── NMT 게이트 ──
+    //    마스터가 NMT Start 를 보내 Operational 이 되기 전에는
+    //    (= 하트비트 감시가 아직 동작하지 않는 구간) 켜는 방향의 전이를 받지 않는다.
+    //    SDO 는 Pre-operational 에서도 처리되므로, 이 게이트가 없으면
+    //    SDO 로 0x6040 에 06 → 07 → 0F 를 써서 감시 없이 기동할 수 있다.
+    //    이미 켜진 축이 Operational 을 벗어나면 Switch On Disabled 로 내린다.
+    //    (운전 중 하트비트가 끊기는 경우는 updateDriveSafety() 가 Fault 로 먼저 처리한다)
+    if (!nmtOperational() && ax->state != CIA402_FAULT) {
+        if (ax->state != CIA402_SWITCH_ON_DISABLED) {
+            ax->state = CIA402_SWITCH_ON_DISABLED;
+            resetControlState(ax);
+        }
+        cmd = CMD_NONE;                 // 아래 switch 에서 아무 전이도 일어나지 않게
+    }
 
     switch (ax->state) {
 
         case CIA402_SWITCH_ON_DISABLED:
-            // 0x06 (Shutdown) → Ready to Switch On
-            if (cmd == CW_SHUTDOWN) {
+            // Shutdown → Ready to Switch On
+            if (cmd == CMD_SHUTDOWN) {
                 ax->state = CIA402_READY_TO_SWITCH_ON;
             }
             break;
 
         case CIA402_READY_TO_SWITCH_ON:
-            // 0x07 (Switch On) → Switched On
-            if (cmd == CW_SWITCH_ON) {
+            // Switch On → Switched On
+            // (Switch On + Enable Operation 도 표준상 먼저 Switched On 으로 간다.
+            //  같은 Controlword 가 유지되므로 다음 루프에서 Operation Enabled 로 이어진다)
+            if (cmd == CMD_SWITCH_ON || cmd == CMD_ENABLE_OPERATION) {
                 ax->state = CIA402_SWITCHED_ON;
                 // 파워단(릴레이)은 updatePowerStage() 가 두 축 상태를 보고
                 // 판단한다. 릴레이가 좌우 공용이라 축 하나만 보고 켜면 안 된다.
             }
-            // 0x00 (Disable Voltage) → 되돌아감
-            else if (cmd == CW_DISABLE_VOLTAGE) {
+            // Disable Voltage → 되돌아감
+            else if (cmd == CMD_DISABLE_VOLTAGE) {
                 ax->state = CIA402_SWITCH_ON_DISABLED;
             }
             break;
 
         case CIA402_SWITCHED_ON:
-            // 0x0F (Enable Operation) → Operation Enabled
-            if (cmd == CW_ENABLE_OPERATION) {
+            // Enable Operation → Operation Enabled
+            if (cmd == CMD_ENABLE_OPERATION) {
                 ax->state = CIA402_OPERATION_ENABLED;
                 resetControlState(ax);   // 적분 리셋 후 제어 시작
             }
-            // 0x06 (Shutdown) → 되돌아감
-            else if (cmd == CW_SHUTDOWN) {
+            // Shutdown → 되돌아감
+            else if (cmd == CMD_SHUTDOWN) {
                 ax->state = CIA402_READY_TO_SWITCH_ON;
                 // 파워단 차단도 updatePowerStage() 가 처리
             }
-            else if (cmd == CW_DISABLE_VOLTAGE) {
+            else if (cmd == CMD_DISABLE_VOLTAGE) {
                 ax->state = CIA402_SWITCH_ON_DISABLED;
             }
             break;
 
         case CIA402_OPERATION_ENABLED:
-            // 0x07 → Switched On (제어 중지, 전원 유지)
-            if (cmd == CW_SWITCH_ON) {
+            // Switch On(Disable Operation) → Switched On (제어 중지, 전원 유지)
+            if (cmd == CMD_SWITCH_ON) {
                 ax->state = CIA402_SWITCHED_ON;
                 resetControlState(ax);
             }
-            // 0x06 → Ready to Switch On
-            else if (cmd == CW_SHUTDOWN) {
+            // Shutdown → Ready to Switch On
+            else if (cmd == CMD_SHUTDOWN) {
                 ax->state = CIA402_READY_TO_SWITCH_ON;
                 resetControlState(ax);
             }
-            // 0x00 → Switch On Disabled
-            else if (cmd == CW_DISABLE_VOLTAGE) {
+            // Disable Voltage → Switch On Disabled
+            else if (cmd == CMD_DISABLE_VOLTAGE) {
                 ax->state = CIA402_SWITCH_ON_DISABLED;
                 resetControlState(ax);
             }
@@ -412,9 +475,11 @@ void controlLoopAxis(MotorAxis* ax, float dt)
     //   if (ax->current_a > MAX_CURRENT) raiseFault(ERR_OVERCURRENT);
     //   → raiseFault() 가 두 축을 모두 Fault 로 내린다
 
-    // ── 2) Operation Enabled 아니면 모터 정지 (게이트) ──
+    // ── 2) 구동 허용 게이트 ──
+    //    이 축이 Operation Enabled + Profile Velocity 여야 하고,
+    //    DRIVE_REQUIRE_ALL_AXES 가 1 이면 다른 축도 같은 조건이어야 한다.
     //    Fault 상태도 여기에 걸려서 출력이 막힌다.
-    if (ax->state != CIA402_OPERATION_ENABLED) {
+    if (!driveOutputAllowed(ax)) {
         setMotorAxis(ax, 0);
         ax->integral   = 0.0f;
         ax->prev_error = 0.0f;
@@ -435,6 +500,8 @@ void controlLoopAxis(MotorAxis* ax, float dt)
     }
 
     // ── 3) 운전 모드 확인 (Profile Velocity만 지원) ──
+    //    DRIVE_REQUIRE_ALL_AXES 가 1 이면 2) 에서 이미 걸러지지만,
+    //    0 일 때와 이후 수정에 대비해 그대로 둔다.
     if (*ax->od_mode != MODE_PROFILE_VELOCITY) {
         setMotorAxis(ax, 0);
         ax->dbg_pwm_f = 0.0f;
@@ -679,6 +746,33 @@ void updateDriveSafety(void)
     }
 }
 
+// ── 파워단이 필요한 상태인가 ──────────────────────────────
+//    CiA 402 에서 Switched On 부터 "전원이 들어간" 상태다.
+uint8_t axisPowerRequested(const MotorAxis* ax)
+{
+    return (ax->state == CIA402_SWITCHED_ON ||
+            ax->state == CIA402_OPERATION_ENABLED);
+}
+
+// ── 구동 준비 판단 ────────────────────────────────────────
+//    한 축이 실제로 목표속도를 따라 돌 수 있는 상태인가.
+uint8_t axisReadyToDrive(const MotorAxis* ax)
+{
+    return (ax->state == CIA402_OPERATION_ENABLED &&
+            *ax->od_mode == MODE_PROFILE_VELOCITY);
+}
+
+//    이 축에 PWM 을 내보내도 되는가.
+uint8_t driveOutputAllowed(const MotorAxis* ax)
+{
+#if DRIVE_REQUIRE_ALL_AXES
+    (void)ax;   // 두 축을 함께 보므로 개별 축은 쓰지 않는다
+    return (axisReadyToDrive(&axis_r) && axisReadyToDrive(&axis_l));
+#else
+    return axisReadyToDrive(ax);
+#endif
+}
+
 // ── 파워단(릴레이) 제어 ───────────────────────────────────
 //    릴레이는 좌우 공용이므로 두 축 상태를 모두 보고 판단한다.
 //    아무 조건도 성립하지 않으면 꺼진다 (평상시 비여자).
@@ -686,13 +780,20 @@ void updatePowerStage(void)
 {
     uint8_t want_on = 0;
 
-    if (g_estop_ok && g_fault_code == ERR_NONE) {
-        if (axis_r.state == CIA402_SWITCHED_ON ||
-            axis_r.state == CIA402_OPERATION_ENABLED ||
-            axis_l.state == CIA402_SWITCHED_ON ||
-            axis_l.state == CIA402_OPERATION_ENABLED) {
+    // NMT Operational 조건: 마스터가 정식으로 시작시켰고 하트비트 감시가
+    // 살아 있을 때만 파워단을 켠다. (상태머신의 NMT 게이트와 이중으로 막는다)
+    if (g_estop_ok && g_fault_code == ERR_NONE && nmtOperational()) {
+#if DRIVE_REQUIRE_ALL_AXES
+        // 두 축이 모두 켜달라고 해야 붙인다
+        if (axisPowerRequested(&axis_r) && axisPowerRequested(&axis_l)) {
             want_on = 1;
         }
+#else
+        // 한 축이라도 켜달라고 하면 붙인다 (릴레이가 좌우 공용이므로)
+        if (axisPowerRequested(&axis_r) || axisPowerRequested(&axis_l)) {
+            want_on = 1;
+        }
+#endif
     }
 
     if (want_on && !g_power_on) {
@@ -700,6 +801,11 @@ void updatePowerStage(void)
         g_power_on_ms = HAL_GetTick();
         setPowerStage(1);
     } else if (!want_on && g_power_on) {
+        // 전류가 흐르는 채로 접점을 열면 아크로 접점이 상한다.
+        // 한 축만 내려가도 릴레이가 꺼지므로, 다른 축의 PWM 도 먼저 0 으로 내린다.
+        // (PID 출력은 20ms 마다 갱신되므로 기다리지 않고 여기서 바로 끈다)
+        setMotorAxis(&axis_r, 0);
+        setMotorAxis(&axis_l, 0);
         g_power_on = 0;
         setPowerStage(0);
     }

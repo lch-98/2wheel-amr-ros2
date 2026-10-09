@@ -121,7 +121,7 @@
 │   ├── MotorEncoderTest_JGB37520/     # [Arduino] 통합 확인
 │   ├── MotorJGB37520_Firmware/        # [Arduino] 실사용 최종 펌웨어 (구버전)
 │   └── STM32_CANopen/
-│       └── main.c                     # [STM32] CANopenNode + CiA402 2축 펌웨어 + 안전 로직 (현행)
+│       └── main.c                     # [STM32] CANopenNode + CiA402 2축 펌웨어 + 안전 계통 (현행, J-3)
 │
 ├── maps/                              # COLCON_IGNORE — SLAM으로 그린 지도 저장소
 │   ├── sim/
@@ -1014,6 +1014,55 @@ Operation Enabled (SW 0x0027)   ← 이 상태에서만 모터에 전류가 걸�
 Statusword 비교 시 **하위 비트만 마스킹**(`& 0x006F`)해야 합니다. bit10(Target Reached) 등 상위 비트는
 상태와 무관하게 변하므로, 마스킹 없이 `== 0x0027`로 비교하면 오작동합니다.
 
+**Controlword도 명령마다 정해진 비트만 봐야 합니다** (`decodeControlword()`).
+
+| 명령 | CiA 402 패턴 (x = 무관) | 판정 |
+|---|---|---|
+| Shutdown | `0xxx x110` | `(cw & 0x87) == 0x06` |
+| Switch On | `0xxx 0111` | `(cw & 0x8F) == 0x07` |
+| Switch On + Enable Operation | `0xxx 1111` | `(cw & 0x8F) == 0x0F` |
+| Disable Voltage | `0xxx xx0x` | `(cw & 0x82) == 0x00` |
+| Fault Reset | 비트7 `0 → 1` | 상승 에지 (`updateDriveSafety()`) |
+
+> **하위 4비트를 `0x06`과 그대로 비교하면 안 됩니다.** upstream 드라이버는 `recover`(Fault Reset 이후)에서
+> Shutdown을 **`0x0E`** 로 보냅니다 (운전 중 켜 둔 비트3을 지우지 않음). 비트3은 Shutdown에서 무관 비트라
+> 규격상 올바른 명령인데, `== 0x06`으로 비교하면 놓쳐서 Switch On Disabled에 갇히고
+> 마스터는 `Transition timed out`을 냅니다. `init`은 Controlword를 0부터 다시 만들어 `0x06`을 보내므로
+> 이 문제가 드러나지 않습니다. 실제로 겪은 문제입니다 (트러블슈팅 참고).
+> Quick Stop(`0xxx x01x`)과 Halt(비트8)는 아직 구현하지 않아 무시합니다.
+
+**안전 계통**
+
+하드웨어: 비상정지 스위치(NC) → `PC1`(10kΩ 풀다운, HIGH = 정상) / 릴레이 `IN` ← `PC0`(LOW = ON) /
+배터리(+) → 릴레이 `COM`→`NO` → MDD10A `B+`. 릴레이가 붙어야만 모터 드라이버에 전원이 들어갑니다.
+
+펌웨어는 매 루프마다 아래 순서로 판단합니다 (`main()` 무한 루프).
+
+```
+① updateDriveSafety()   E-Stop·통신 감시 → 고장이면 두 축 모두 Fault, Fault Reset 처리
+② updateStateMachine()  Controlword → 축별 상태 전이 → Statusword
+③ updatePowerStage()    릴레이 ON/OFF 결정
+④ controlLoopAxis()     20ms 마다 PID → PWM
+```
+
+| 기능 | 동작 |
+|---|---|
+| 고장은 드라이브 단위 | 한 축이라도 고장이면 **두 축 모두** Fault, PWM 0 (차동구동에서 한쪽만 서면 제자리 회전) |
+| E-Stop | 누름은 즉시 반영, 해제는 50 ms 연속 유지돼야 인정. 코드 `0xFF01`(제조사 정의) |
+| 통신 감시 | 마스터 하트비트 300 ms(`100 × 3`) 소실 → NMT Pre-operational → 고장 `0x8130` |
+| Fault Reset | Controlword 비트7 **상승 에지** + E-Stop 해제 상태일 때만. 두 축 모두 Switch On Disabled로 |
+| NMT 게이트 | NMT Operational이 아니면 켜는 방향의 상태 전이를 받지 않음 (Pre-operational에서 SDO로 `0x6040`에 써도 기동 불가) |
+| 릴레이 ON 조건 | E-Stop 해제 **AND** 고장 없음 **AND** NMT Operational **AND 두 축 모두** Switched On 이상 |
+| PWM 출력 조건 | **두 축 모두** Operation Enabled + Profile Velocity, 그리고 릴레이 ON 후 50 ms 경과 |
+| 릴레이 OFF 순서 | 두 축 PWM을 먼저 0으로 내린 뒤 접점을 엶 (전류가 흐르는 채로 열면 아크로 접점 손상) |
+
+> **"두 축 모두" 조건은 `DRIVE_REQUIRE_ALL_AXES`로 끌 수 있습니다.** `0`으로 빌드하면 릴레이는 한 축만
+> 켜져도 붙고 PWM도 축마다 따로 판단합니다. 한 축만 돌려 보는 시험(J-9의 6번)에서만 쓰세요.
+>
+> **아직 없는 것**: 과전류 감지(INA226 예정), 릴레이 접점 융착 감지, 고장 원인의 EMCY 송신
+> (E-Stop 시 Statusword는 Fault가 되지만 `081` EMCY는 나가지 않아 마스터는 원인을 모릅니다),
+> 제동(릴레이 차단은 coast 정지).
+
 **제어 루프** (20ms / 50Hz, Arduino 펌웨어에서 그대로 이식)
 
 ```
@@ -1417,19 +1466,20 @@ ros2 service call /left_wheel/target canopen_interfaces/srv/COTargetDouble "{tar
 
 upstream `Cia402System`은 런치만으로는 모터를 활성화하지 **않습니다.** 런치 직후 두 축은
 Switch On Disabled 상태이고 모드도 선택되지 않아, `/cmd_vel_out`을 보내도 바퀴가 돌지 않습니다.
-펌웨어는 Switch On 명령을 받을 때 릴레이를 켜므로, **릴레이도 이때까지 꺼져 있는 것이 정상**입니다.
+펌웨어는 **두 축이 모두** Switch On 명령을 받아야 릴레이를 켜므로(J-3 안전 계통), **릴레이도 이때까지 꺼져 있는 것이 정상**입니다.
 
 런치를 띄운 뒤 **다른 터미널에서** 채널마다 아래 순서로 호출합니다 (source 3줄 먼저).
 
 ```bash
 # [Pi] 터미널 2
-ros2 service call /right_wheel/init std_srvs/srv/Trigger           # ← 이때 릴레이가 붙음
+ros2 service call /right_wheel/init std_srvs/srv/Trigger           # 오른쪽 Operation Enabled, 릴레이는 아직 OFF
 ros2 service call /right_wheel/velocity_mode std_srvs/srv/Trigger
-ros2 service call /left_wheel/init std_srvs/srv/Trigger
-ros2 service call /left_wheel/velocity_mode std_srvs/srv/Trigger
+ros2 service call /left_wheel/init std_srvs/srv/Trigger            # ← 두 축 모두 켜진 이때 릴레이가 붙음
+ros2 service call /left_wheel/velocity_mode std_srvs/srv/Trigger   # ← 이 뒤부터 바퀴가 명령을 따름
 ```
 
 네 번 모두 `success=True`가 나오면 `/cmd_vel_out`(조이스틱·Nav2)으로 주행할 수 있습니다.
+**넷 중 하나라도 빠지면 두 바퀴 모두 돌지 않습니다** (한쪽만 돌아 로봇이 제자리에서 도는 상황을 펌웨어가 막습니다).
 
 | 서비스 | 하는 일 |
 |---|---|
@@ -1446,10 +1496,14 @@ ros2 service call /left_wheel/velocity_mode std_srvs/srv/Trigger
 ```bash
 # [Pi] E-Stop 해제 후, 터미널 2
 ros2 service call /right_wheel/recover std_srvs/srv/Trigger
+ros2 service call /left_wheel/recover std_srvs/srv/Trigger         # ← 두 축 모두 복귀한 이때 릴레이가 붙음
 ros2 service call /right_wheel/velocity_mode std_srvs/srv/Trigger
-ros2 service call /left_wheel/recover std_srvs/srv/Trigger
 ros2 service call /left_wheel/velocity_mode std_srvs/srv/Trigger
 ```
+
+Fault Reset은 드라이브 단위라, 오른쪽 `recover`만으로도 두 축의 Fault가 함께 풀립니다(둘 다 Switch On Disabled `40`).
+그래도 왼쪽은 마스터가 다시 올려야 하므로 **두 축 모두** `recover`를 호출해야 합니다.
+`recover`는 사람이 원인을 확인한 뒤에 호출하는 것을 원칙으로 하며, 자동화하지 않습니다.
 
 **컨트롤러 설정** (`config/my_robot_controllers.yaml`)
 
@@ -1690,14 +1744,30 @@ effort:   [.nan, .nan]                # effort 는 백포트에서 제외 (정�
 
 **5. 안전 계통 확인**
 
-1. 직진 명령을 보내는 중에 **E-Stop**을 누릅니다 → 바퀴 정지, 릴레이 OFF.
-2. E-Stop을 해제하고 J-7의 `recover` → `velocity_mode` 순서로 호출합니다 → 릴레이 ON.
+1. 직진 명령을 보내는 중에 **E-Stop**을 누릅니다 → 바퀴 정지, 릴레이 OFF, `181`·`381` 모두 `08 ..`(Fault).
+2. E-Stop을 해제하고 J-7의 "E-Stop 이후 복구" 순서로 호출합니다 → 두 번째 `recover`에서 릴레이 ON.
 3. 직진 명령을 다시 보내 바퀴가 도는지 확인합니다 (**런치 재시작 없이 복귀**).
+4. 런치를 Ctrl+C로 끕니다 → 약 300 ms 안에 릴레이 OFF (하트비트 소실).
+
+**두 축 조건 확인** — `right_wheel`만 `init` + `velocity_mode`를 하고 직진 명령을 보내면 **두 바퀴 모두 돌지 않고**
+릴레이도 붙지 않아야 합니다. 이어서 `left_wheel`까지 켜는 순간 함께 돌기 시작해야 합니다.
+
+**NMT 게이트 확인** — 런치를 끄고 STM32를 리셋한 뒤(Pre-operational), SDO로 Controlword를 써 봅니다.
+```bash
+cansend can0 601#2B.40.60.00.06.00.00.00    # 0x6040 ← 0x06
+cansend can0 601#2B.40.60.00.07.00.00.00    # 0x6040 ← 0x07
+cansend can0 601#40.41.60.00.00.00.00.00    # 0x6041 읽기
+# 581 ... 60 40 60 00 (쓰기는 받아들여짐) ×2,  581 ... 4B 41 60 00 40 00 → Switch On Disabled 그대로, 릴레이 OFF
+```
+끝나면 STM32를 다시 리셋합니다.
 
 **6. 단일 채널 하위 호환 확인 (선택)**
 
 upstream에 "채널 기능을 추가해도 기존 단일 축 사용자에게 영향이 없다"는 근거로 낸 시험입니다.
 평소 주행에는 필요 없습니다.
+
+> **펌웨어를 `DRIVE_REQUIRE_ALL_AXES 0`으로 빌드해 올린 뒤 하세요.** 기본값(1)에서는 왼쪽 축이 꺼져 있으면
+> 오른쪽도 돌지 않고 릴레이도 붙지 않습니다. 시험이 끝나면 반드시 `1`로 되돌려 다시 올리세요.
 
 ```bash
 # [Pi] 1) 2채널 설정 백업
@@ -1828,6 +1898,9 @@ cd ~/robot_ws && colcon build --packages-select my_robot_canopen
 - **런치는 정상인데 바퀴가 안 돌고 릴레이도 안 붙음** → upstream `Cia402System`은 모터를 자동 활성화하지 않습니다. `init` → `velocity_mode` 서비스를 채널마다 호출하세요 (J-7). `init` 호출 시점에 릴레이가 붙어야 정상입니다.
 - **`channel_names`를 생략했더니 `InvalidServiceNameError: topic name token must not start with a number`로 사망** → 기본 채널 이름이 `노드이름/0`처럼 숫자로 시작해 서비스 이름이 될 수 없는 것 (upstream #427에서 수정 제안 중). `bus.yml`에 `channel_names`를 문자로 시작하는 이름으로 명시하세요.
 - **E-Stop 후 `init`만 다시 호출하면 안 돌아감** → Fault 상태에서는 `recover`를 먼저 호출해야 합니다. `recover` → `velocity_mode` 순서 (J-7).
+- **`recover`가 `success=False`, 런치에 `Fault reset` 다음 `Transition timed out` / `Could not enable motor`, Statusword가 `40`에서 멈춤** → 펌웨어가 Controlword를 하위 4비트 전체(`& 0x0F == 0x06`)로 비교하고 있는 것. 마스터는 Fault Reset 뒤 Shutdown을 `0x0E`로 보냅니다. candump에서 `201 [3] 8F ..` 다음 `201 [3] 0E ..`가 나오는데 `181`이 `40`에 머무르면 이 경우입니다. 명령별 비트 마스크로 해석하세요 (J-3의 Controlword 표).
+- **한쪽 바퀴만 `init`했더니 아무것도 안 돎, 릴레이도 안 붙음** → 정상입니다. 펌웨어가 두 축이 모두 준비돼야 출력합니다 (J-3 안전 계통). 한 축만 돌려야 하면 `DRIVE_REQUIRE_ALL_AXES 0`으로 빌드하세요.
+- **STM32 리셋 없이 SDO로 Controlword를 써도 아무 반응이 없음** → 이전에 Operational이었다가 런치를 끈 상태라면 하트비트 고장(`0x8130`)이 걸려 있는 것. 시험 전에는 STM32를 리셋하세요.
 
 **CAN 물리 계층**
 
