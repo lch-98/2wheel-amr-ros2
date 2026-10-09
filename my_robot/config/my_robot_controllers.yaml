@@ -29,7 +29,7 @@ diff_drive_controller:
     twist_covariance_diagonal: [0.001, 0.001, 0.001, 0.001, 0.001, 0.01]
 
     open_loop: false             # 엔코더 피드백으로 오도메트리 계산
-    position_feedback: false     # 우리는 속도만 피드백 (position 은 아직 0)
+    position_feedback: false     # 속도 피드백으로 오도메트리 계산 (위치 피드백은 아직 미검증)
     enable_odom_tf: false        # EKF가 TF 발행         # odom → base_footprint TF 발행
 
     cmd_vel_timeout: 1.0         # 명령 끊기면 정지 (안전장치)
