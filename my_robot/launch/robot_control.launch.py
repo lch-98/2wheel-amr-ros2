@@ -1,9 +1,10 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, RegisterEventHandler
+from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
-from launch.substitutions import Command, PathJoinSubstitution
+from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
@@ -78,9 +79,38 @@ def generate_launch_description():
         )
     )
 
+    # ── 드라이브 자동 활성화 ──
+    #   diff_drive_controller 가 올라온 뒤 두 축을 init → velocity_mode 로 한 번 켠다.
+    #   실패하면 재시도하지 않는다 (init 에 Fault Reset 이 포함돼 있어, 반복하면
+    #   E-Stop 해제 즉시 사람 확인 없이 다시 켜지기 때문). 고장 복귀는 수동 recover.
+    #   끄려면: ros2 launch my_robot robot_control.launch.py auto_enable:=false
+    auto_enable = LaunchConfiguration('auto_enable')
+
+    drive_enabler = Node(
+        package='my_robot',
+        executable='drive_enabler.py',
+        parameters=[{
+            'channels': ['right_wheel', 'left_wheel'],   # bus.yml 의 channel_names 와 같아야 함
+            'controller': 'diff_drive_controller',
+        }],
+        output='screen',
+        condition=IfCondition(auto_enable),
+    )
+
+    delay_enable = RegisterEventHandler(
+        event_handler=OnProcessExit(
+            target_action=ddc_spawner,
+            on_exit=[drive_enabler],
+        )
+    )
+
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'auto_enable', default_value='true',
+            description='true: 컨트롤러가 뜬 뒤 두 축을 자동으로 init + velocity_mode'),
         control_node,
         robot_state_pub,
         jsb_spawner,
         delay_ddc,
+        delay_enable,
     ])

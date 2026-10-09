@@ -39,6 +39,7 @@ install(PROGRAMS
   my_robot/base_controller.py
   my_robot/keyboard_teleop.py
   my_robot/imu_node.py
+  my_robot/drive_enabler.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

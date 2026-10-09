@@ -103,6 +103,7 @@
 │   ├── my_robot/                      # 파이썬 노드
 │   │   ├── base_controller.py         # 모터 구동 + odom 계산 (실물 전용 - arduino 전용)
 │   │   ├── imu_node.py                # MPU6050 IMU 드라이버 (실물 전용)
+│   │   ├── drive_enabler.py           # 런치 직후 CANopen 드라이브 자동 활성화 (실물 전용, J-7)
 │   │   └── keyboard_teleop.py         # 커스텀 teleop (실물 전용 - arduino 전용)
 │   └── src/
 │       └── ydlidar_node.cpp           # YDLIDAR 드라이버, 공식 SDK 링크 (실물 전용)
@@ -1016,13 +1017,17 @@ Statusword 비교 시 **하위 비트만 마스킹**(`& 0x006F`)해야 합니다
 
 **Controlword도 명령마다 정해진 비트만 봐야 합니다** (`decodeControlword()`).
 
-| 명령 | CiA 402 패턴 (x = 무관) | 판정 |
-|---|---|---|
-| Shutdown | `0xxx x110` | `(cw & 0x87) == 0x06` |
-| Switch On | `0xxx 0111` | `(cw & 0x8F) == 0x07` |
-| Switch On + Enable Operation | `0xxx 1111` | `(cw & 0x8F) == 0x0F` |
-| Disable Voltage | `0xxx xx0x` | `(cw & 0x82) == 0x00` |
-| Fault Reset | 비트7 `0 → 1` | 상승 에지 (`updateDriveSafety()`) |
+| 명령 | CiA 402 패턴 (x = 무관) | 판정 | 코드의 상수 |
+|---|---|---|---|
+| Disable Voltage | `0xxx xx0x` | `(cw & 0x82) == 0x00` | `CW_MASK_DISABLE_VOLTAGE` / `CW_VAL_DISABLE_VOLTAGE` |
+| Quick Stop | `0xxx x01x` | `(cw & 0x86) == 0x02` | `CW_MASK_QUICK_STOP` / `CW_VAL_QUICK_STOP` |
+| Shutdown | `0xxx x110` | `(cw & 0x87) == 0x06` | `CW_MASK_SHUTDOWN` / `CW_VAL_SHUTDOWN` |
+| Switch On | `0xxx 0111` | `(cw & 0x8F) == 0x07` | `CW_MASK_SWITCH_ON` / `CW_VAL_SWITCH_ON` |
+| Switch On + Enable Operation | `0xxx 1111` | `(cw & 0x8F) == 0x0F` | `CW_MASK_ENABLE_OP` / `CW_VAL_ENABLE_OP` |
+| Fault Reset | 비트7 `0 → 1` | 상승 에지 (`updateDriveSafety()`) | `CW_FAULT_RESET_BIT` |
+
+모든 마스크에 비트7이 들어 있어서, 비트7이 서 있으면(Fault Reset 중) 어떤 명령에도 걸리지 않습니다.
+마스크와 값을 한 쌍으로 이름 붙인 이유는 "값은 맞는데 마스크가 틀린" 실수(아래 `0x0E` 문제)를 막기 위해서입니다.
 
 > **하위 4비트를 `0x06`과 그대로 비교하면 안 됩니다.** upstream 드라이버는 `recover`(Fault Reset 이후)에서
 > Shutdown을 **`0x0E`** 로 보냅니다 (운전 중 켜 둔 비트3을 지우지 않음). 비트3은 Shutdown에서 무관 비트라
@@ -1030,6 +1035,60 @@ Statusword 비교 시 **하위 비트만 마스킹**(`& 0x006F`)해야 합니다
 > 마스터는 `Transition timed out`을 냅니다. `init`은 Controlword를 0부터 다시 만들어 `0x06`을 보내므로
 > 이 문제가 드러나지 않습니다. 실제로 겪은 문제입니다 (트러블슈팅 참고).
 > Quick Stop(`0xxx x01x`)과 Halt(비트8)는 아직 구현하지 않아 무시합니다.
+
+**상태 전이 따라가기** — "OP"라는 말이 두 가지라 헷갈리기 쉽습니다.
+
+| 이름 | 무엇의 상태 | 누가 바꾸나 | candump |
+|---|---|---|---|
+| NMT Operational | **통신** ("PDO를 주고받아도 된다") | 런치 시 마스터가 자동으로 (`000 01 01`) | `701 [1] 05` |
+| CiA 402 Operation Enabled | **모터 드라이브** ("명령대로 돌려도 된다") | Controlword `06 → 07 → 0F` | `181 [3] 27 ..` |
+
+candump 읽는 법 (리틀엔디언, 뒤 바이트가 상위):
+```
+201 [3]  06 01 03          181 [3]  27 00 03
+         └─┬─┘ └┬┘                  └─┬─┘ └┬┘
+   Controlword  모드           Statusword  모드 표시
+     = 0x0106   = 3              = 0x0027   = 3
+```
+
+Statusword는 상태마다 비트가 하나씩 켜지는 계단입니다.
+
+| 상태 | Statusword | 비트0 Ready | 비트1 Switched On | 비트2 Op. Enabled | 비트3 Fault | 모터 |
+|---|---|---|---|---|---|---|
+| Switch On Disabled | `0x40` | 0 | 0 | 0 | 0 | 정지 |
+| Ready to Switch On | `0x21` | **1** | 0 | 0 | 0 | 정지 |
+| Switched On | `0x23` | **1** | **1** | 0 | 0 | 정지 (릴레이 요청) |
+| Operation Enabled | `0x27` | **1** | **1** | **1** | 0 | 회전 가능 |
+| Fault | `0x08` | 0 | 0 | 0 | **1** | 정지 |
+
+계단은 건너뛸 수 없습니다. 꺼진 상태(`40`)에서 바로 `0F`를 보내도 아무 일도 없고, 반드시 `06 → 07 → 0F` 순서여야 합니다.
+
+```
+          Shutdown(06)          Switch On(07)          Enable Op(0F)
+  (40) ───────────────▶ (21) ───────────────▶ (23) ───────────────▶ (27)
+   ▲                                      │ 두 축 모두 여기 오면      │ 두 축 모두 여기 + 모드 3
+   │ Fault Reset (비트7 0→1, E-Stop 해제)  ▼ 릴레이 ON               ▼ + 릴레이 후 50ms → PWM
+  (08) ◀── 어느 상태에서든: E-Stop, 하트비트 끊김 (두 축 동시)
+```
+
+정리하면 단계마다 조건이 다릅니다.
+
+| 단계 | 조건 | 결과 |
+|---|---|---|
+| NMT Operational | 런치 시 마스터가 자동으로 | `701 05`. 이게 없으면 아래 전부 막힘 (NMT 게이트) |
+| Switched On (`23`) | Controlword `06 → 07` | 그 축이 전원을 요청 |
+| 릴레이 ON | **두 축 모두** `23` 이상 + E-Stop 해제 + 고장 없음 + NMT OP | MDD10A에 배터리 전압 공급 |
+| Operation Enabled (`27`) | Controlword `0F` | 그 축이 운전 상태 |
+| 바퀴 회전 | **두 축 모두** `27` + 모드 3, 릴레이 ON 후 50 ms, 목표속도 ≠ 0 | PWM 출력 |
+
+실제 `init` 한 번의 프레임 (오른쪽):
+```
+201 [3] 06 01 00 → 181 [3] 21 00 00     Shutdown   → Ready to Switch On
+201 [3] 07 01 00 → 181 [3] 23 00 00     Switch On  → Switched On   (왼쪽이 아직 40 이면 릴레이 OFF)
+201 [3] 0F 01 00 → 181 [3] 27 00 00     Enable Op  → Operation Enabled (모드 0 이라 PWM 0)
+201 [3] 0F 01 03 → 181 [3] 27 00 03     velocity_mode: 모드 3
+201 [3] 0F 00 03                        마스터가 비트8(Halt)을 내림 (펌웨어는 Halt 를 무시)
+```
 
 **안전 계통**
 
@@ -1462,34 +1521,76 @@ ros2 service call /left_wheel/target canopen_interfaces/srv/COTargetDouble "{tar
 </xacro:if>
 ```
 
-**모터 활성화는 서비스로 (중요)**
+**모터 활성화 — 런치 직후 자동 (`drive_enabler.py`)**
 
 upstream `Cia402System`은 런치만으로는 모터를 활성화하지 **않습니다.** 런치 직후 두 축은
-Switch On Disabled 상태이고 모드도 선택되지 않아, `/cmd_vel_out`을 보내도 바퀴가 돌지 않습니다.
-펌웨어는 **두 축이 모두** Switch On 명령을 받아야 릴레이를 켜므로(J-3 안전 계통), **릴레이도 이때까지 꺼져 있는 것이 정상**입니다.
+Switch On Disabled(`40`)이고 모드도 없습니다. 예전 커스텀 드라이버는 `on_activate()`에서 이 과정을 했지만
+upstream 하드웨어 인터페이스에는 그 기능이 없어서, 별도 노드 `drive_enabler.py`가 대신합니다.
 
-런치를 띄운 뒤 **다른 터미널에서** 채널마다 아래 순서로 호출합니다 (source 3줄 먼저).
+`robot_control.launch.py`가 `diff_drive_controller` 스포너가 끝난 뒤 이 노드를 띄우고, 노드는 **한 번만** 아래를 하고 종료합니다.
 
-```bash
-# [Pi] 터미널 2
-ros2 service call /right_wheel/init std_srvs/srv/Trigger           # 오른쪽 Operation Enabled, 릴레이는 아직 OFF
-ros2 service call /right_wheel/velocity_mode std_srvs/srv/Trigger
-ros2 service call /left_wheel/init std_srvs/srv/Trigger            # ← 두 축 모두 켜진 이때 릴레이가 붙음
-ros2 service call /left_wheel/velocity_mode std_srvs/srv/Trigger   # ← 이 뒤부터 바퀴가 명령을 따름
+1. `/right_wheel/init`, `/left_wheel/init` 등 서비스가 뜰 때까지 대기 (최대 60초)
+2. `diff_drive_controller`가 `active`가 될 때까지 대기 — 활성화 순간 바퀴 명령이 0이게 하려는 것
+3. `/right_wheel/init` → `/left_wheel/init` (`06 → 07 → 0F`) — **왼쪽 init에서 릴레이 ON**
+4. `/right_wheel/velocity_mode` → `/left_wheel/velocity_mode` — **이 뒤부터 바퀴가 `/cmd_vel_out`을 따름**
+
+`mapping.launch.py`, `navigation.launch.py`도 `robot_control.launch.py`를 포함하므로 똑같이 자동 활성화됩니다.
+
+**정상 로그** (런치 터미널)
+```
+[drive_enabler]: 드라이브 활성화 시작: channels=['right_wheel', 'left_wheel']
+[drive_enabler]: diff_drive_controller: active
+[drive_enabler]: /right_wheel/init: success=True
+[drive_enabler]: /left_wheel/init: success=True
+[drive_enabler]: /right_wheel/velocity_mode: success=True
+[drive_enabler]: /left_wheel/velocity_mode: success=True
+[drive_enabler]: 드라이브 활성화 완료 — /cmd_vel_out 명령을 따릅니다
+[INFO] [drive_enabler.py-N]: process has finished cleanly
 ```
 
-네 번 모두 `success=True`가 나오면 `/cmd_vel_out`(조이스틱·Nav2)으로 주행할 수 있습니다.
+**실패하면 재시도하지 않습니다 (의도된 동작).** upstream의 `init`은 내부에서 **Fault Reset도 함께** 보냅니다.
+실패할 때마다 재시도하면 E-Stop을 푸는 순간 사람 확인 없이 다시 켜져 버립니다(사실상 `recover` 자동화).
+그래서 노드는 `init`이 `success=False`면 이미 켠 채널을 `disable`로 되돌리고, 원인을 로그로 남긴 뒤 종료합니다.
+펌웨어도 두 축이 모두 준비되지 않으면 출력하지 않으므로 한쪽만 도는 일은 없습니다.
+기다리며 재시도하는 것은 "서비스·컨트롤러가 아직 안 떴을 때"뿐입니다.
+
+**한 채널이 실패해도 모든 채널에 `init`을 한 번씩은 부릅니다.** upstream 드라이버는 `velocity_mode` 같은
+모드 객체를 **`init` 안에서만** 만들고, `recover`는 만들지 않습니다. 그래서 런치 후 `init`을 한 번도 받지 못한
+채널은 나중에 `recover`가 성공해도 `velocity_mode`가 `success=False`로 끝납니다 (실제로 겪은 문제, 트러블슈팅 참고).
+
+E-Stop을 누른 채 런치하면 이렇게 끝나는 것이 정상입니다. 원인을 확인하고 아래 "E-Stop 이후 복구" 순서로 켜세요.
+```
+[drive_enabler]: /right_wheel/init: success=False
+[drive_enabler]: /left_wheel/init: success=False
+[drive_enabler]: init 실패 채널: ['right_wheel', 'left_wheel']. 재시도하지 않습니다. ...
+```
+E-Stop을 풀어도 저절로 켜지지 않아야 정상입니다.
+
+**자동 활성화를 끄고 수동으로 켜기** (시험·디버깅용)
+```bash
+# [Pi] 터미널 1
+ros2 launch my_robot robot_control.launch.py auto_enable:=false
+```
+```bash
+# [Pi] 터미널 2 (source 3줄 먼저) — 노드가 하는 것과 같은 순서
+ros2 service call /right_wheel/init std_srvs/srv/Trigger           # 오른쪽 Operation Enabled, 릴레이는 아직 OFF
+ros2 service call /left_wheel/init std_srvs/srv/Trigger            # ← 두 축 모두 켜진 이때 릴레이가 붙음
+ros2 service call /right_wheel/velocity_mode std_srvs/srv/Trigger
+ros2 service call /left_wheel/velocity_mode std_srvs/srv/Trigger   # ← 이 뒤부터 바퀴가 명령을 따름
+```
 **넷 중 하나라도 빠지면 두 바퀴 모두 돌지 않습니다** (한쪽만 돌아 로봇이 제자리에서 도는 상황을 펌웨어가 막습니다).
 
 | 서비스 | 하는 일 |
 |---|---|
-| `init` | CiA 402 상태머신을 Operation Enabled까지 진행 (`06 → 07 → 0F`) |
+| `init` | Fault Reset 후 CiA 402 상태머신을 Operation Enabled까지 진행 (`06 → 07 → 0F`) |
 | `velocity_mode` | 동작 모드를 Profile Velocity(3)로 설정 |
 | `recover` | Fault 해제(Fault Reset) 후 Operation Enabled로 복귀 |
-| `halt` | 정지 |
+| `disable` | Operation Enabled → Switched On (전원 유지, 제어 중지) |
+| `halt` | Quick Stop 요청 (펌웨어 미구현 — 현재는 효과 없음) |
 
-> **이 수동 호출은 다음 작업에서 런치 파일로 자동화할 예정입니다.** 예전 커스텀 드라이버는
-> `on_activate()`에서 자동으로 했지만, upstream 하드웨어 인터페이스에는 그 기능이 없습니다.
+> **"Servo ON" 관점에서 주의:** 자동 활성화 이후에는 속도 명령이 들어오는 즉시 바퀴가 돕니다.
+> 조이스틱은 데드맨 스위치, Nav2는 목표가 있어야 명령을 내고, `cmd_vel_timeout`(1초)이 지나면 0으로 멈춥니다.
+> 사람이 버튼으로 켜는 방식이 필요하면 `auto_enable:=false`로 띄우고 위 서비스를 직접 호출하세요.
 
 **E-Stop 이후 복구** — 런치를 다시 띄울 필요가 없습니다.
 
@@ -1504,6 +1605,10 @@ ros2 service call /left_wheel/velocity_mode std_srvs/srv/Trigger
 Fault Reset은 드라이브 단위라, 오른쪽 `recover`만으로도 두 축의 Fault가 함께 풀립니다(둘 다 Switch On Disabled `40`).
 그래도 왼쪽은 마스터가 다시 올려야 하므로 **두 축 모두** `recover`를 호출해야 합니다.
 `recover`는 사람이 원인을 확인한 뒤에 호출하는 것을 원칙으로 하며, 자동화하지 않습니다.
+
+> **`init`을 한 번도 받지 못한 채널은 `recover` 대신 `init`을 호출하세요.** 예: `auto_enable:=false`로 띄운 뒤
+> 아무것도 호출하지 않은 상태, 또는 이전 버전 `drive_enabler`(첫 실패에서 멈춤)로 띄운 경우.
+> `init`도 Fault Reset을 포함하므로 복구 역할은 같고, 모드 객체까지 만들어 줍니다.
 
 **컨트롤러 설정** (`config/my_robot_controllers.yaml`)
 
@@ -1671,15 +1776,11 @@ ros2 launch my_robot mapping.launch.py
 ros2 launch my_robot robot_control.launch.py
 ```
 
-**2. 모터 활성화** (J-7)
-
-```bash
-# [Pi] 터미널 2
-ros2 service call /right_wheel/init std_srvs/srv/Trigger
-ros2 service call /right_wheel/velocity_mode std_srvs/srv/Trigger
-ros2 service call /left_wheel/init std_srvs/srv/Trigger
-ros2 service call /left_wheel/velocity_mode std_srvs/srv/Trigger
+**2. 모터 활성화 확인** (J-7) — 자동으로 됩니다. 런치 터미널에서 아래 줄이 보이면 됩니다.
 ```
+[drive_enabler]: 드라이브 활성화 완료 — /cmd_vel_out 명령을 따릅니다
+```
+이 줄이 나오는 시점에 릴레이가 붙어 있어야 하고, candump의 `181`·`381`이 `27 00 03`이어야 합니다.
 
 **3. 단계별 확인**
 
@@ -1895,8 +1996,10 @@ cd ~/robot_ws && colcon build --packages-select my_robot_canopen
 - **로드 경로에 `liblely_master_bridge.so`, `libnode_canopen_basic_master.so`만 `/opt/ros`로 남음** → 백포트 빌드 때 `canopen_master_driver`를 빠뜨린 것. `colcon build --packages-up-to canopen_ros2_control canopen_master_driver`로 다시 빌드하고 2단계 6번을 다시 실행하세요 (새 폴더가 목록에 추가되어야 함).
 - **`ldconfig -p` 결과에 같은 라이브러리가 두 줄씩 나옴** → 정상입니다. **위쪽 줄이 실제로 쓰이는 것**이므로, 첫 줄이 `canopen_ws`이면 됩니다.
 - **드라이버 단독 실행 시 `CanController: Operation not permitted`로 즉시 사망** → 실행되는 `device_container_node`가 백포트 빌드본(`~/canopen_ws/install/...`)인데 그 파일에 권한이 없는 것. J-2의 2)를 실행하세요. `canopen_ws`를 다시 빌드한 뒤에도 같은 증상이 나옵니다.
-- **런치는 정상인데 바퀴가 안 돌고 릴레이도 안 붙음** → upstream `Cia402System`은 모터를 자동 활성화하지 않습니다. `init` → `velocity_mode` 서비스를 채널마다 호출하세요 (J-7). `init` 호출 시점에 릴레이가 붙어야 정상입니다.
+- **런치는 정상인데 바퀴가 안 돌고 릴레이도 안 붙음** → 런치 로그에서 `drive_enabler`를 찾으세요. ① `success=False`면 E-Stop이 눌려 있었거나 고장 상태였던 것 — 재시도하지 않는 것이 정상이며, 원인 확인 후 J-7의 "E-Stop 이후 복구" 순서로 켭니다. ② `서비스가 ... 나타나지 않음`이면 `bus.yml`의 `channel_names`와 `robot_control.launch.py`의 `channels` 파라미터가 다른 것. ③ `drive_enabler` 줄이 아예 없으면 `auto_enable:=false`로 띄웠거나 `diff_drive_controller` 스포너가 끝나지 않은 것.
+- **`drive_enabler.py`를 찾을 수 없음 (`executable ... not found`)** → `my_robot` 패키지를 다시 빌드하지 않은 것. `colcon build --packages-select my_robot` 후 source.
 - **`channel_names`를 생략했더니 `InvalidServiceNameError: topic name token must not start with a number`로 사망** → 기본 채널 이름이 `노드이름/0`처럼 숫자로 시작해 서비스 이름이 될 수 없는 것 (upstream #427에서 수정 제안 중). `bus.yml`에 `channel_names`를 문자로 시작하는 이름으로 명시하세요.
+- **`recover`는 `success=True`, 릴레이도 붙었는데 한 채널만 `velocity_mode`가 `success=False`** → 그 채널이 런치 후 `init`을 한 번도 받지 못한 것. upstream은 모드 객체를 `init`에서만 만들고 `recover`에서는 만들지 않습니다. 그 채널에 `init` → `velocity_mode`를 호출하면 됩니다. 현재 `drive_enabler`는 실패해도 모든 채널에 `init`을 한 번씩 부르므로 자동 활성화 경로에서는 생기지 않습니다 (J-7).
 - **E-Stop 후 `init`만 다시 호출하면 안 돌아감** → Fault 상태에서는 `recover`를 먼저 호출해야 합니다. `recover` → `velocity_mode` 순서 (J-7).
 - **`recover`가 `success=False`, 런치에 `Fault reset` 다음 `Transition timed out` / `Could not enable motor`, Statusword가 `40`에서 멈춤** → 펌웨어가 Controlword를 하위 4비트 전체(`& 0x0F == 0x06`)로 비교하고 있는 것. 마스터는 Fault Reset 뒤 Shutdown을 `0x0E`로 보냅니다. candump에서 `201 [3] 8F ..` 다음 `201 [3] 0E ..`가 나오는데 `181`이 `40`에 머무르면 이 경우입니다. 명령별 비트 마스크로 해석하세요 (J-3의 Controlword 표).
 - **한쪽 바퀴만 `init`했더니 아무것도 안 돎, 릴레이도 안 붙음** → 정상입니다. 펌웨어가 두 축이 모두 준비돼야 출력합니다 (J-3 안전 계통). 한 축만 돌려야 하면 `DRIVE_REQUIRE_ALL_AXES 0`으로 빌드하세요.

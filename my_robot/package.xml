@@ -17,6 +17,8 @@
   <depend>nav_msgs</depend>
   <depend>tf2_ros</depend>
   <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>controller_manager_msgs</depend>
 
   <exec_depend>xacro</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
