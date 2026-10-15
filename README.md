@@ -47,7 +47,7 @@
 ## 0. 활용 플랫폼, 제어 구조 및 실행 영상
 
 ### 활용 플랫폼 (자체 제작)
-<img width="966" height="1173" alt="로봇실사진" src="https://github.com/user-attachments/assets/a0a22a08-7569-4268-97eb-6ad8b9c7d071" />
+<img width="1000" height="1000" alt="KakaoTalk_20261015_214913496" src="https://github.com/user-attachments/assets/6683b8fe-d2cb-474d-9afb-18a4f5277b24" />
 
 - 메인제어기:   Raspberry pi4 8gb
 - 하위제어기:   Arduino Mega 2560 (STM32 가능: CANopen)
